@@ -118,7 +118,7 @@ When you run the script you will be asked:
 6) output file is saved.
 
 ## Acknowledgements
-This code has been under development for many years with involvement from a number of PhD students in Manchester and Liverpool including: Rosanne McKernan, Mike Chandler, Rochelle Taylor, Yusuf Bashir, Lining Yang, Note need to add people from Liverpool.
+This code has been under development for many years with involvement from a number of coleagues in Manchester and Liverpool including: Ernie Rutter, Rosanne McKernan, Mike Chandler, Rochelle Taylor, Yusuf Bashir, Lining Yang, Pete Armitage, John Bedford... Note need to add people from Liverpool.
 
 ## References
 Bernabé, Y., et al. (2006). "A note on the oscillating flow method for measuring rock permeability." International Journal of Rock Mechanics and Mining Sciences 43(2): 311-316.
