@@ -4,7 +4,7 @@ Code to process pore pressure oscilation permeability measurement technique. The
 
 $$A\mathrm{e}^{-\mathrm{i}\phi}=\left(\frac{1+\mathrm{i}}{\sqrt{\xi\eta}}\mathrm{sinh}\left[\left(1+\mathrm{i}\right)\sqrt{\frac{\xi}{\eta}}\right]+\mathrm{cosh}\left[\left(1+\mathrm{i}\right)\sqrt{\frac{\xi}{\eta}}\right]\right)^{-1}$$
 
-A graphical representation of this eqquation is given here:
+A graphical representation of this equation is given here:
 <img width="607" height="475" alt="image" src="https://github.com/user-attachments/assets/15a93b07-ba4f-4571-96e2-ead6b92663c5" />
 
 This equation cannot be simply rearranged to find $\eta$ and $\xi$ so has to be solved iteratively by seeking to minimize the mismatch function:
