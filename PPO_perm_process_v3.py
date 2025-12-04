@@ -4,7 +4,7 @@
 """
 Created on Mon Jan 20 15:48:58 2025
 
-@author: MBESSJM1
+@author: Julian Mecklenburgh (University of Manchester)
 """
 import os
 from tkinter import Tk
@@ -25,6 +25,12 @@ from iapws import IAPWS95
 from iapws import _iapws
 from argon import Argon_Z
 from argon import argon_visc
+
+# Check and switch to an interactive backend if needed
+if not plt.get_backend().lower().startswith('qt') and not plt.get_backend().lower().startswith('tk'):
+    import matplotlib
+    matplotlib.use('Qt5Agg')  # or 'Qt5Agg''TkAgg'
+    import matplotlib.pyplot as plt  # re-import after setting backend
 
 
 
@@ -47,10 +53,10 @@ def fitboth(b0,xm,yup,ydwn):
     gdwn=b0[3]*np.sin(2*np.pi/b0[6]*xm+b0[4])+b0[5]
     E=np.sum(np.abs(gup-yup)**2)+np.sum(np.abs(gdwn-ydwn)**2)
     return E
-def get_freq(y,t):
+def get_freq(y,t,Tmax,Tmin):
     fs=1/np.mean(np.diff(t)) # calculate sampling frequency
-    # look at freqs between 1/10,000 Hz and 1/100 Hz
-    freqs=np.linspace(1/10000,1/100,10000)
+    # look at freqs between 1/10,000 Hz and 1/10 Hz
+    freqs=np.linspace(1/Tmax,1/Tmin,10000)
     ls = LombScargle(t,y)
     power = ls.power(freqs)
     peaks,properties = find_peaks(power, width=True)
@@ -87,9 +93,9 @@ def ls_sin_fit(y,t,fw):
             phase=phase+2*np.pi
     return amp,phase,offset
 
-def fit_sines(up,dwn,t):
+def fit_sines(up,dwn,t,Tmax,Tmin):
     # Get main freq from upstream
-    fw,width=get_freq(up,t)
+    fw,width=get_freq(up,t,Tmax,Tmin)
     # Use linear least-squares to fit sin waves
     amp_up,phase_up,offset_up=ls_sin_fit(up, t, fw)
     amp_dwn,phase_dwn,offset_dwn=ls_sin_fit(dwn, t, fw)
@@ -116,7 +122,7 @@ def fit_sines(up,dwn,t):
     return updat,dwndat
 
 
-def sin_fits_bootstrap(up, dwn, t, Num):
+def sin_fits_bootstrap(up, dwn, t, Num,Tmin, Tmax):
     """
     Perform bootstrap resampling to estimate the uncertainty of sinusoidal model parameters.
 
@@ -132,7 +138,7 @@ def sin_fits_bootstrap(up, dwn, t, Num):
     - params_up, params_dwn: bootstrap parameter samples
     """
     # Fit the original data
-    upfit, dwnfit= fit_sines(up, dwn, t)
+    upfit, dwnfit= fit_sines(up, dwn, t,Tmax,Tmin)
 
     # Generate model predictions
     freq = 1/upfit[1]
@@ -154,7 +160,7 @@ def sin_fits_bootstrap(up, dwn, t, Num):
         dwn_bs = yfit_dwn + res_dwn[indx]
 
         try:
-            up_fit, dwn_fit = fit_sines(up_bs, dwn_bs, t)
+            up_fit, dwn_fit = fit_sines(up_bs, dwn_bs, t,Tmax,Tmin)
             params_up[i, :] = up_fit
             params_dwn[i, :] = dwn_fit
         except (ValueError, TypeError):
@@ -176,9 +182,10 @@ def sin_fits_bootstrap(up, dwn, t, Num):
 
 def plot_bootstrap_distributions(params_up, params_dwn, original_up, original_dwn,plt_num):
     param_names = ['Amplitude', 'Period', 'Phase', 'Offset']
-    fig, axes = plt.subplots(4, 2, figsize=(8, 9),num=plt_num)
     plt.figure(plt_num).clf()
-    axes = fig.subplots(4, 2)
+    fig, axes = plt.subplots(4, 2, figsize=(8, 9),num=plt_num)
+    
+    #axes = fig.subplots(4, 2)
     params_dwn = np.where(np.isinf(params_dwn), np.nan, params_dwn)
     params_up = np.where(np.isinf(params_up), np.nan, params_up)
     for i in range(4):
@@ -201,7 +208,7 @@ def plot_bootstrap_distributions(params_up, params_dwn, original_up, original_dw
     fig.suptitle('Bootstrap Distributions of Fit Parameters', fontsize=16)
     
     fig.tight_layout(rect=[0, 0, 1, 1], h_pad=2.0)
-    plt.subplots_adjust(top=0.95, bottom=0.05)
+    #plt.subplots_adjust(top=0.95, bottom=0.05)
     plt.show()
 
 
@@ -290,8 +297,9 @@ def plot_nomo(plt_num):
     etas=np.array([1.6,0.8,0.4,0.2,0,-.2,-.4,-0.6,-.8,-1,-1.2,-1.4,-1.6,-1.8])
     A_lookup,phi_lookup,eta_lookup,xi_lookup=lookup_table()
     # Plot nomogram
+    plt.figure(plt_num).clf()
     plt.figure(plt_num)
-    plt.clf()
+    
     green_color = (0, 0.5, 0)
     if first_loop==True:
         for n in range(len(xis)): 
@@ -356,10 +364,14 @@ def solve_bern_eq(A,phi,wie):
     xi0=float(xi0[0])
     if xi0<0.1:
         eta0=(2*A)/((1-A**2)**0.5)
-    A0=np.abs(((1+1j)/np.sqrt(eta0*xi0)*np.sinh((1+1j)*np.sqrt(xi0/eta0))+\
-               np.cosh((1+1j)*np.sqrt(xi0/eta0)))**(-1))
-    phi0=np.angle(((1+1j)/np.sqrt(eta0*xi0)*np.sinh((1+1j)*np.sqrt(xi0/eta0))+\
-                   np.cosh((1+1j)*np.sqrt(xi0/eta0)))**(-1))
+        A0=eta0/(eta0**2 + 4)**(1/2)
+        phi0=np.arctan((-(A0-1)*(A0+1))**0.5/A0)
+    else:
+        A0=np.abs(((1+1j)/np.sqrt(eta0*xi0)*np.sinh((1+1j)*np.sqrt(xi0/eta0))+\
+            np.cosh((1+1j)*np.sqrt(xi0/eta0)))**(-1))
+        phi0=np.angle(((1+1j)/np.sqrt(eta0*xi0)*np.sinh((1+1j)*np.sqrt(xi0/eta0))+\
+            np.cosh((1+1j)*np.sqrt(xi0/eta0)))**(-1))
+
     # Checks phi is in correct range
     if phi0>0:
         phi0=phi0-2*np.pi
@@ -437,7 +449,7 @@ Dv_err = 0.01e-6  # error in downstream vol
 Temp=293
 permeant='water' # 'water' ,'argon' or 'rheolube'
 # File info
-HeaderRows=3
+HeaderRows=3 # Number of header rows
 time_col=0 # time column
 Pup_col=1 # upstream Pressure column
 Pdwn_col=2 # downstream pressure column
@@ -448,6 +460,8 @@ w=0.5 # wieght 0.5 equal wiegth of A and phi
 # Convert units
 l = l / 1000  # length in m
 area = np.pi * (dia / 2000) ** 2  # area in m^2
+Tmin=10 #min period s
+Tmax=10000 #max period s
 
 
 # Prompt user to select output file location once
@@ -478,22 +492,33 @@ else:
         pdwn = all_file[:, Pdwn_col]
         pc=np.mean(all_file[:, Pc_col])
 
-        # Plot for data selection
-        plt.figure(1)
-        plt.clf()
-        plt.plot(time, pup, 'r', label='Upstream Pressure')
-        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Pressure (MPa)')
-        plt.title('Click start and end points for processing')
-        plt.legend()
-        plt.grid()
+        # Stage 1: coarse ROI selection
+        fig, ax = plt.subplots(num=1)
+        ax.plot(time, pup, 'r', label='Upstream Pressure')
+        ax.plot(time, pdwn, 'b', label='Downstream Pressure')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Pressure (MPa)')
+        ax.set_title('Click start and end points for coarse ROI')
+        ax.legend()
+        ax.grid()
         plt.show()
 
-        # Get user input
+        # Get coarse ROI
         pts = plt.ginput(2, timeout=-1)
         tree = KDTree(np.column_stack((time, pup)))
         idx = [tree.query(pt)[1] for pt in pts]
+
+        # Stage 2: refine ROI inside coarse window
+        ax.set_xlim(time[idx[0]], time[idx[1]])   # zoom into coarse ROI
+        ax.set_title('Click start and end points for refined ROI')
+        plt.draw()   # update the existing figure
+
+        # Get refined ROI
+        pts = plt.ginput(2, timeout=-1)
+        tree = KDTree(np.column_stack((time, pup)))
+        idx = [tree.query(pt)[1] for pt in pts]
+
+        
 
         # Plot selected range
         plt.figure(2)
@@ -514,7 +539,7 @@ else:
         pdwn = pdwn[idx[0]:idx[1] + 1]
 
         # Fit and model
-        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N)
+        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N,Tmin,Tmax)
         plot_bootstrap_distributions(up_params_bs, dwn_params_bs, updata, dwndata, 3)
 
         upmodel = updata[3] + updata[0] * np.sin(time * 2 * np.pi / updata[1] + updata[2])
