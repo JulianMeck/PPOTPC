@@ -48,7 +48,7 @@ You can set the column number in the input data file for time, upstream pressure
 ## LSSA Method
 The script uses a least-squares spectral analysis (LSSA) technique to fit the sine wave oscilations of the upstream and downstream waves. The is preferred to FFT method as you do not need to have a whole number of waveforms, the data do not have to be evenly sampled and the method can reliably fit a single waveform although results are best with ~5-10 waves. First the frequency (or period) of the inputted upstream oscilations is calculated by evaluating the Lomb-Scargle periodogram that outputs the power-spectrum density using the ```LombScargle``` function from the ```Astropy``` project. Then the upstream amplitiude $A_{\mathrm{up}}$, downstream amplitude $A_{\mathrm{dwn}}$, upstream phase $\phi_{\mathrm{up}}$, downstream phase $\phi_{\mathrm{dwn}}$, upstream offset $C_{\mathrm{up}}$ and downstream offset $C_{\mathrm{dwn}}$ are claculated using a linear regression where you solve $\alpha$, $\beta$ and $\gamma$ in the following equation:
 
-$$y=A+B\mathrm{sin}(\omega t)+C\mathrm{cos}(\omega t)$$
+$$y=\alpha+\beta\mathrm{sin}(\omega t)+\gamma\mathrm{cos}(\omega t)$$
 
 by solving the matrix equation:
 
@@ -72,11 +72,11 @@ y_n\\
 $$
 where the amplitude $A$, offest $B$ and phase $\phi$ are calculated using:
 $$ A=\sqrt{\beta^{2}+\gamma^{2}}$$
-$$ B=\alpha$$ and
+$$ C=\alpha$$ and
 $$\phi = \mathrm{atan}\left(\frac{\gamma}{\beta}\right)$$
 One issue with this fitting is it cannot tell the difference between 2 sin waves 180° out of phase so a check is made to look at residuals of for the fit parameter and a fit 180° phase shifted the one with lowest residuals is then chosen. Then we refine the fit using a minimization routine where we fit both upstream and down stream together with the same period. This is to avoid using a different period to fit upstream and downstream. We minimize the function $E$:
 $$ g_{\mathrm{up}}=C_{\mathrm{up}}+A_{\mathrm{up}}\mathrm{sin}(2\pi f t + \phi_{\mathrm{up}})$$
-$$ g_{\mathrm{dwn}}=C_{\mathrm{dwn}}+A_{\mathrm{dwn}}\mathrm{sin}(2\pi f t + \phi_{\mathrm{dwn}})$$
+$$ g_{\mathrm{dwn}}=C_{\mathrm{dwn}}+A_{\mathrm{dwn}}\mathrm{sin}(2\pi f t + \phi_{\mathrm{dwn}})+L_{\mathrm{dwn}}t$$
 $$ E=\sum{(g_{\mathrm{up}}-P_{\mathrm{up}})^2+(g_{\mathrm{dwn}}-P_{\mathrm{dwn}})^2}$$
 
 Then we can calculate the phase shift and gain between the upstream and downstream.
