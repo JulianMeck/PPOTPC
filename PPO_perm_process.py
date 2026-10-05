@@ -70,10 +70,16 @@ v4
     [4] ROI selection: two independent figure windows instead of reusing
         the same axes, preventing label overlap on repeated runs.
         Nomogram legend added.
-v6 (this file)
+v6 
   [1] simplified the fitting of pressure waves
   
   [2] Added a linear function to the fit of downstream to fit to account for leaks temperature drift
+  
+v7 
+
+    [1] new branch to do continuous processing so you can have time dependent perm
+    [2] tidied up some of the procedures
+
   
 """
 import os
@@ -82,13 +88,23 @@ from tkinter import filedialog
 from tkinter import messagebox
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib
+# ROI selection uses ginput(), which requires an interactive GUI backend.
+# Select Tk before importing pyplot so VS Code does not leave us on an inline backend.
+try:
+    matplotlib.use('TkAgg')
+except (ImportError, RuntimeError) as exc:
+    raise RuntimeError(
+        "The TkAgg plotting backend could not be enabled. Run this script in "
+        "VS Code's terminal (not the Jupyter/Interactive window) and ensure "
+        "Tkinter is installed."
+    ) from exc
+import matplotlib.pyplot as plt
 import seaborn as sns
 from astropy.timeseries import LombScargle
 import scipy.io
 from scipy.spatial import KDTree
-from scipy.signal import find_peaks, butter, filtfilt
+from scipy.signal import find_peaks #, butter, filtfilt
 from scipy.optimize import minimize
 from scipy.interpolate import griddata
 from scipy.optimize import curve_fit
@@ -98,6 +114,8 @@ from iapws import _iapws
 from argon import Argon_Z
 from argon import argon_visc
 import numdifftools as nd
+#import time as time_py
+from tqdm import tqdm
 
 # Force-close any figures left over from a previous run in the same session,
 # then give the event loop a moment to fully release tkinter resources before
@@ -109,17 +127,6 @@ try:
     plt.pause(0.2)          # let the old event loop drain
 except Exception:
     pass
-
-# Switch to an interactive backend only when necessary.
-# NOTE: matplotlib.use() cannot change the backend after it has already been
-# initialised in this session, so we guard the call carefully.
-_backend = matplotlib.get_backend().lower()
-if not (_backend.startswith('qt') or _backend.startswith('tk')):
-    try:
-        matplotlib.use('Qt5Agg')
-        import matplotlib.pyplot as plt   # re-import after backend switch
-    except Exception:
-        pass  # keep whatever backend is already active
 
 print("=" * 60)
 print("PPO Permeability Processing - Modified Version")
@@ -364,15 +371,16 @@ def sin_fits_bootstrap(up, dwn, t, Num, Tmin, Tmax):
         not any(np.isnan(up_err_hess))
         and not any(np.isnan(dwn_err_hess))
     )
-    if hessian_ok:
-        print("  [Hessian errors: OK — using as primary uncertainty estimate]")
-    else:
-        print("  [Hessian ill-conditioned — will fall back to bootstrap errors]")
-
+    #if hessian_ok:
+        
+        #print("  [Hessian errors: OK — using as primary uncertainty estimate]")
+    #else:
+        #print("  [Hessian ill-conditioned — will fall back to bootstrap errors]")
+        
     # ── 2. Bootstrap (needed for eta/xi distribution even if Hessian is OK) ──
     freq     = 1 / upfit[1]
-    print(f"Period: {upfit[1]:.3e} s")
-    print(f"Frequecy: {freq:.3e} Hz")
+    #print(f"Period: {upfit[1]:.3e} s")
+    #print(f"Frequecy: {freq:.3e} Hz")
     yfit_up  = upfit[0]  * np.sin(2 * np.pi * freq * t + upfit[2])  + upfit[3]
     yfit_dwn = dwnfit[0] * np.sin(2 * np.pi * freq * t + dwnfit[2]) + dwnfit[3] + dwnfit[4] * t
     res_up   = up  - yfit_up
@@ -574,18 +582,18 @@ def solve_bern_eq(A, phi, w):
     if xi0 is None or np.isnan(xi0):
         xi0 = 0
     
-    print(f"eta0:  {eta0}")
-    print(f"xi0:  {xi0}")
+    #print(f"eta0:  {eta0}")
+    #print(f"xi0:  {xi0}")
     # Forward model at interpolated starting point
     # MATLAB: if xi0 < 0.1 use analytical approximation (avoids division by zero)
     if xi0 is None or np.isnan(xi0) or xi0 < 0.01:
         # Analytical solution for xi=0 (Bernabe 2006)
         A0   = eta0 / np.sqrt(eta0**2+4)
         phi0 = np.arctan(np.sqrt(1-A0**2)/A0)
-        print(" Used Approximation to where xi ~ 0")
+        # print(" Used Approximation to where xi ~ 0")
     else:
         A0, phi0 = bern_fwd(float(eta0), float(xi0))
-        print(" Used full calculation to get A0 and phi0")
+        # print(" Used full calculation to get A0 and phi0")
 
     # ── Boundary check: is phi inside the solution space? ──────────────────
     # phi_xi0 = phase at xi→0 (lower bound of solution space)
@@ -696,8 +704,90 @@ def bern_hessian_errors(x_sol, A, phi, w, eta, xi):
 
     return float(eta_err), float(xi_err) if not np.isnan(xi_err) else np.nan
 
+def bern_errors(x_sol, A,Aerr, phi, w, eta, xi,up_params_bs,dwn_params_bs):
+    """
+    Hessian-based error estimation — consistent for xi=0 and xi>0.
 
-def plot_nomo(plt_num):
+    xi = 0  (boundary case)
+    ─────────────────────
+    The solution lives on the xi→0 wall, so xi is not a free parameter.
+    We compute the 1-D Hessian of the cost w.r.t. log_eta only, with
+    log_xi pinned to the boundary value stored in x_sol[1].
+    This avoids the diverging analytical formula  η_err ∝ 1/(1-A²)
+    that blows up when A → 1.
+
+    xi > 0  (interior case)
+    ────────────────────────
+    Full 2-D Hessian w.r.t. [log_eta, log_xi], same as before.
+
+    In both cases:  σ_p = p · ln(10) · σ_log   (log→linear conversion)
+    
+    Calculates errors from bootstrapping if Hessian errors not acceptable
+
+    Returns
+    -------
+    eta_err : float
+    xi_err  : float  (nan when xi = 0, parameter not resolved)
+    """
+    LN10 = np.log(10)
+
+    if xi == 0:
+        # ── 1-D Hessian: vary only log_eta, pin log_xi ────────────────────
+        log_xi_pin = float(x_sol[1])   # boundary value set in solve_bern_eq
+        def cost_1d(log_eta):
+            return bern_eq([float(np.asarray(log_eta).flat[0]), log_xi_pin], A, phi, w)
+        try:
+            H1 = float(nd.Hessian(cost_1d)(np.array([x_sol[0]]))[0, 0])
+            if H1 <= 0:
+                raise ValueError("Non-positive 1-D Hessian")
+            eta_err = float(eta * LN10 * np.sqrt(1.0 / H1))
+        except Exception:
+            eta_err = np.nan
+        xi_err = np.nan   # xi is not a free parameter on the boundary
+
+    else:
+        # ── 2-D Hessian: both log_eta and log_xi free ─────────────────────
+        try:
+            H2   = nd.Hessian(lambda x: bern_eq(x, A, phi, w))(x_sol)
+            cond = np.linalg.cond(H2)
+            if cond > 1e12:
+                raise np.linalg.LinAlgError(f"ill-conditioned (cond={cond:.2e})")
+            H_inv = np.linalg.inv(H2)
+            diag  = np.diag(H_inv)
+            e_log = np.where(diag > 0, np.sqrt(diag), np.nan)
+            eta_err = float(eta * LN10 * e_log[0])
+            xi_err  = float(xi  * LN10 * e_log[1])
+        except Exception:
+            eta_err = np.nan
+            xi_err  = np.nan
+
+    # ── Fallback to bootstrap if Hessian error is implausibly large (>100%) ──
+    # MOVED OUTSIDE ELSE BLOCK: This allows xi == 0 case to use it
+    if np.isnan(eta_err) or eta_err / eta > 1.0:
+        if xi == 0:
+            _ae = eta * np.sqrt((Aerr / A)**2 + (A * Aerr / (1 - A**2))**2)
+            eta_err = float(_ae) if np.isfinite(_ae) else eta_err
+            xi_err  = np.nan
+        else:
+            Adist   = dwn_params_bs[:, 0] / up_params_bs[:, 0]
+            phidist = up_params_bs[:, 2] - dwn_params_bs[:, 2]
+            phidist[phidist < 0] += 2 * np.pi
+            eta_dist = np.zeros_like(Adist)
+            xi_dist  = np.zeros_like(Adist)
+            for _p, (_Ai, _phi_i) in enumerate(zip(Adist, phidist)):
+                xi_dist[_p], eta_dist[_p], *_ = solve_bern_eq(_Ai, _phi_i, w)
+            _ind = np.where((xi_dist < 16) & (Adist > 0))[0]
+            if len(_ind) > 1:
+                _ae = np.std(eta_dist[_ind], ddof=1)
+                _xe = np.std(xi_dist[_ind],  ddof=1)
+                if np.isfinite(_ae): eta_err = _ae
+                if np.isfinite(_xe): xi_err  = _xe
+
+    return float(eta_err), float(xi_err) if not np.isnan(xi_err) else np.nan
+
+    
+
+def plot_nomo(plt_num,no_leg):
     """
     Nomogram for Bernabe (2006) equation — replica of MATLAB figure.
 
@@ -782,8 +872,11 @@ def plot_nomo(plt_num):
     leg_fit   = mlines.Line2D([], [], color='red',   marker='x', linestyle='None',
                               markersize=8, markeredgewidth=2,
                               label='Bernabé fit (φ_fit, log A_fit)')
-    ax.legend(handles=[leg_data, leg_start, leg_fit],
-              loc='lower right', fontsize=8, framealpha=0.8)
+    if no_leg=='yes':
+        pass
+    else:
+        ax.legend(handles=[leg_data, leg_start, leg_fit],
+                  loc='lower right', fontsize=8, framealpha=0.8)
 
     make_figure_topmost(fig)
     plt.tight_layout()
@@ -831,6 +924,27 @@ def rheolube(Temp,P):
     mu=mug*np.exp(-np.log(10)*(C1*(Temp-Tg)*F)/(C2+(Temp-Tg)*F))
     return C0,mu
 
+def permeant_props(permeant,Temp,Press,bd_mode,bd,bd_err,Dv,Dv_err):
+    # Usage:
+    #  C,visc,bd,bd_err=permeant_props(permeant,Temp,Press,bd_mode,bd,bd_err,Dv,Dv_err)    
+    if permeant == 'water':
+        C, visc = water(Temp, Press)
+    elif permeant == 'argon':
+        C, visc = argon(Temp, Press)
+    elif permeant == 'rheolube':
+        C, visc = rheolube(Temp, Press)
+    else:
+        C, visc = argon(Temp, Press)
+    
+        # ── CHANGE v4 [3]: compute bd per measurement when in Dv mode ─────────
+    if bd_mode == 'bd':
+        # bd was entered directly — use as-is (fixed for all measurements)
+        pass   # bd and bd_err already set
+    else:
+        # Dv mode: bd = Dv × C(T, P)  — computed from fluid compressibility
+        bd      = float(Dv * C)
+        bd_err  = float(C * Dv_err)   # dominant term; C uncertainty neglected
+    return C,visc,bd,bd_err
 
 def ask_to_continue():
     root = Tk()
@@ -900,8 +1014,14 @@ print("          (recommended for compressible fluids, e.g. argon)")
 print()
 while True:
     bd_mode = input("  Choose mode [bd / Dv]: ").strip().lower()
+    
+    # If the user just hits Enter, set the default to 'dv'
+    if bd_mode == "":
+        bd_mode = "dv"
+        
     if bd_mode in ('bd', 'dv'):
         break
+        
     print("   Please type  bd  or  Dv")
 
 if bd_mode == 'bd':
@@ -938,10 +1058,17 @@ Pc_col     = prompt("Confining pressure column index",   3,  cast=int)
 print("\n" + "=" * 60)
 print("FITTING PARAMETERS")
 print("=" * 60)
-N    = prompt("Number of bootstrap resamples",           20,     cast=int)
+N2boot    = prompt("Number of bootstrap resamples",           20,     cast=int)
 w    = prompt("A/phi weighting factor (0=A only, 1=phi only, 0.5=equal)", 0.5)
-Tmin = prompt("Minimum oscillation period to search (s)", 1,   cast=float)
+Tmin = prompt("Minimum oscillation period to search (s)", 100,   cast=float)
 Tmax = prompt("Maximum oscillation period to search (s)", 10000, cast=int)
+valid_proc_type = ('sin','cont')
+while True:
+    proc_type = prompt("Is data a single perm measurement [sin] or continuous [cont]?","sin",cast=str)
+    if proc_type in valid_proc_type:
+        break
+    print(f"  ⚠  Invalid choice '{proc_type}'. Please enter one of: {valid_proc_type}")
+
 
 # -- Unit conversions (done after user input) --
 l    = l / 1000                            # mm → m
@@ -957,10 +1084,8 @@ else:
     print(f"  Storage:     Dv = {Dv:.3e} m³  ±  {Dv_err:.3e}  →  bd = Dv×C(T,P) per measurement")
 print(f"  Conditions:  T = {Temp} K  |  permeant = {permeant}")
 print(f"  Columns:     time={time_col}  Pup={Pup_col}  Pdwn={Pdwn_col}  Pc={Pc_col}  header_rows={HeaderRows}")
-print(f"  Fitting:     N={N}  w={w}  Tmin={Tmin} s  Tmax={Tmax} s")
+print(f"  Fitting:     N={N2boot}  w={w}  Tmin={Tmin} s  Tmax={Tmax} s")
 print("=" * 60)
-
-
 # Ensure no matplotlib figures are open before spawning the tkinter dialog.
 # On re-runs inside the same session (Spyder / IPython) stale figure windows
 # hold a tkinter event loop that makes filedialog hang indefinitely.
@@ -982,10 +1107,10 @@ outfile = filedialog.asksaveasfilename(
     initialfile="datafile_proc.csv"
 )
 root.destroy()
-
+plt.ion()
 if not outfile:
     print("Save operation cancelled.")
-else:
+elif proc_type == 'sin':
     print(f"\nOutput will be saved to: {outfile}")
     first_loop = True
     while True:
@@ -999,7 +1124,7 @@ else:
         if not datafile:
             print("No file selected. Exiting loop.")
             break
-
+    
         print(f"\nLoading data from: {os.path.basename(datafile)}")
         # Load and extract data
         all_file = np.loadtxt(datafile, delimiter='\t', skiprows=HeaderRows)
@@ -1011,7 +1136,7 @@ else:
         # NOTE: lowpass filter removed — with fs=1Hz and oscillation periods
         # of ~20-60s, any filter aggressive enough to remove aircon noise
         # also kills the PPO signal. No filtering applied to downstream.
-
+    
         print("\nSTEP 3: Interactive plot will appear")
         print("        Click 2 points to select COARSE region of interest")
         # ── CHANGE v4 [4]: clear figure before recreating axes ───────────────
@@ -1029,14 +1154,15 @@ else:
         ax.set_title('Click start and end points for coarse ROI')
         ax.legend()
         ax.grid()
-        make_figure_topmost(fig)  # Force figure to top
-        plt.show()
-
+        plt.show(block=False)
+        plt.pause(0.1)
+        make_figure_topmost(fig)
+    
         # Get coarse ROI
-        pts = plt.ginput(2, timeout=-1)
+        pts = fig.ginput(2, timeout=-1)
         tree = KDTree(np.column_stack((time, pup)))
         idx = [tree.query(pt)[1] for pt in pts]
-
+    
         # Stage 2: refine ROI — open a completely new figure window
         plt.close(fig)   # close figure 1 entirely
         
@@ -1052,17 +1178,18 @@ else:
         ax2.set_title('Click START and END points for REFINED ROI')
         ax2.legend()
         ax2.grid()
-        make_figure_topmost(fig2)
         plt.tight_layout()
-        plt.show()
-
+        plt.show(block=False)
+        plt.pause(0.1)
+        make_figure_topmost(fig2)
+    
         # Get refined ROI
         pts = fig2.ginput(2, timeout=-1)
         tree = KDTree(np.column_stack((time, pup)))
         idx = [tree.query(pt)[1] for pt in pts]
-
+    
         
-
+    
         # Plot selected range
         plt.figure(2)
         plt.clf()
@@ -1075,15 +1202,15 @@ else:
         plt.title('Selected Data Range')
         plt.legend()
         plt.show()
-
+    
         # Extract selected data
         time = time[idx[0]:idx[1] + 1]
         time=time-np.min(time)
         pup = pup[idx[0]:idx[1] + 1]
         pdwn = pdwn[idx[0]:idx[1] + 1]
-
+    
         # Fit and model
-        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N,Tmin,Tmax)
+        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N2boot,Tmin,Tmax)
         plot_bootstrap_distributions(up_params_bs, dwn_params_bs, updata, dwndata, 3)
         A = np.abs(dwndata[0] / updata[0])
         Aerr = A * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
@@ -1097,10 +1224,10 @@ else:
             phi += 2*np.pi
         
             
-
+    
         upmodel = updata[3] + updata[0] * np.sin(time * 2 * np.pi / updata[1] + updata[2])
         dwnmodel = dwndata[3] + updata[0]*A * np.sin(time * 2 * np.pi / updata[1] + updata[2]-phi)+dwndata[4]*time
-
+    
         plt.figure(4)
         plt.clf()
         plt.plot(time, pup, 'r', label='Upstream Pressure')
@@ -1112,30 +1239,9 @@ else:
         plt.title('Model Fit')
         plt.legend()
         plt.show()
-
-        # Permeant properties + downstream storage capacity
-        if permeant == 'water':
-            C, visc = water(Temp, updata[3])
-        elif permeant == 'argon':
-            C, visc = argon(Temp, updata[3])
-        elif permeant == 'rheolube':
-            C, visc = rheolube(Temp, updata[3])
-        else:
-            C, visc = argon(Temp, updata[3])
-
-        # ── CHANGE v4 [3]: compute bd per measurement when in Dv mode ─────────
-        if bd_mode == 'bd':
-            # bd was entered directly — use as-is (fixed for all measurements)
-            pass   # bd and bd_err already set
-        else:
-            # Dv mode: bd = Dv × C(T, P)  — computed from fluid compressibility
-            bd      = float(Dv * C)
-            bd_err  = float(C * Dv_err)   # dominant term; C uncertainty neglected
-        
-        
-        
     
-
+        C,visc,bd,bd_err=permeant_props(permeant,Temp,updata[3],bd_mode,bd,bd_err,Dv,Dv_err)
+        
         xi, eta, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(A, phi, w)
         if first_loop == True:
             nomo_ax = plot_nomo(5)   # returns main axis, store for all loops
@@ -1152,39 +1258,11 @@ else:
         plt.figure(5).tight_layout()
         plt.figure(5).canvas.draw_idle()
         plt.pause(0.05)
-
-        # ── CHANGE v4 [2]: unified Hessian errors, replaces old split logic ───
-        # Primary: Hessian-based errors (curvature of cost function).
-        # Fallback: bootstrap std when Hessian gives relative error > 100%
-        # (flat cost surface — measurement poorly constrained). Last resort:
-        # analytical formula for xi=0 boundary.
-        eta_err, xi_err = bern_hessian_errors(x_sol, A, phi, w, eta, xi)
-
-        # Fallback to bootstrap if Hessian error is implausibly large (>100%)
-        if np.isnan(eta_err) or eta_err / eta > 1.0:
-            if xi == 0:
-                _ae = eta * np.sqrt((Aerr / A)**2 + (A * Aerr / (1 - A**2))**2)
-                eta_err = float(_ae) if np.isfinite(_ae) else eta_err
-                xi_err  = np.nan
-            else:
-                Adist   = dwn_params_bs[:, 0] / up_params_bs[:, 0]
-                phidist = up_params_bs[:, 2] - dwn_params_bs[:, 2]
-                phidist[phidist < 0] += 2 * np.pi
-                eta_dist = np.zeros_like(Adist)
-                xi_dist  = np.zeros_like(Adist)
-                for _p, (_Ai, _phi_i) in enumerate(zip(Adist, phidist)):
-                    xi_dist[_p], eta_dist[_p], *_ = solve_bern_eq(_Ai, _phi_i, w)
-                _ind = np.where((xi_dist < 16) & (Adist > 0))[0]
-                if len(_ind) > 1:
-                    _ae = np.std(eta_dist[_ind], ddof=1)
-                    _xe = np.std(xi_dist[_ind],  ddof=1)
-                    if np.isfinite(_ae): eta_err = _ae
-                    if np.isfinite(_xe): xi_err  = _xe
-            print("  [η/ξ errors: Hessian >100% — using bootstrap as fallback]")
-        else:
-            print("  [Hessian errors: OK — using as primary uncertainty estimate]")
-        # ── END CHANGE v4 [2] ────────────────────────────────────────────────
-
+    
+        
+        eta_err, xi_err = bern_errors(x_sol, A,Aerr, phi, w, eta, xi,up_params_bs,dwn_params_bs)
+    
+            
         k    = float((eta * np.pi * l * visc * bd) / (area * T))
         kerr = float(np.abs(k) * np.sqrt(
             (eta_err / eta)      ** 2 +
@@ -1193,7 +1271,7 @@ else:
             (2 * dia_err / dia)  ** 2 +
             (up_err[1] / T)      ** 2
         ))
-
+    
         if xi == 0:
             bc     = 0.0
             bc_err = np.nan
@@ -1205,7 +1283,7 @@ else:
                 (2 * dia_err / dia)  ** 2 +
                 (l_err   / l)        ** 2
             ))
-
+    
         # Create and append DataFrame
         file=os.path.basename(datafile)
         output = pd.DataFrame([{
@@ -1240,6 +1318,330 @@ else:
         first_loop = False
         if not ask_to_continue():
             break
-        #cont = input("Process another dataset? (y/n): ").strip().lower()
-        #if cont != 'y':
-            #break
+        
+        
+elif proc_type == 'cont':
+    print(f"\nOutput will be saved to: {outfile}")
+    first_loop = True
+    while True:
+        # Prompt for input data file
+        print("\n" + "=" * 60)
+        print("STEP 2: Please select an INPUT DATA file to process")
+        print("=" * 60)
+        root = create_topmost_root()
+        datafile = filedialog.askopenfilename(title="Select Data File")
+        root.destroy()
+        if not datafile:
+            print("No file selected. Exiting loop.")
+            break
+    
+        print(f"\nLoading data from: {os.path.basename(datafile)}")
+        # Load and extract data
+        all_file = np.loadtxt(datafile, delimiter='\t', skiprows=HeaderRows)
+        # May need to add calibrations here
+        time = all_file[:, time_col]
+        pup = all_file[:, Pup_col]
+        pdwn = all_file[:, Pdwn_col]
+        pc=np.mean(all_file[:, Pc_col])
+        time_all=time
+        pup_all=pup
+        pdwn_all=pdwn
+        
+    
+        print("\nSTEP 3: Interactive plot will appear")
+        print("        Click 2 points to select COARSE region of interest")
+        # ── CHANGE v4 [4]: clear figure before recreating axes ───────────────
+        # v3 reused the same axes on repeated runs, causing axis labels from
+        # the previous run to accumulate (overlap) on the new ones.
+        # Calling .clf() before plt.subplots() ensures a clean slate each time.
+        # Stage 1: coarse ROI selection
+        _fig1 = plt.figure(1)
+        _fig1.clf()
+        fig, ax = plt.subplots(num=1)
+        ax.plot(time, pup, 'r', label='Upstream Pressure')
+        ax.plot(time, pdwn, 'b', label='Downstream Pressure')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Pressure (MPa)')
+        ax.set_title('Click start and end points for coarse ROI')
+        ax.legend()
+        ax.grid()
+        plt.show(block=False)
+        plt.pause(0.1)
+        make_figure_topmost(fig)
+    
+        # Get coarse ROI
+        pts = fig.ginput(2, timeout=-1)
+        tree = KDTree(np.column_stack((time, pup)))
+        idx = [tree.query(pt)[1] for pt in pts]
+    
+        # Stage 2: refine ROI — open a completely new figure window
+        plt.close(fig)   # close figure 1 entirely
+        
+        mask_roi = (time >= time[idx[0]]) & (time <= time[idx[1]])
+        # Clear figure 10 before recreating axes (prevents label overlap on re-runs)
+        _fig10 = plt.figure(10)
+        _fig10.clf()
+        fig2, ax2 = plt.subplots(num=10, figsize=(12, 5))
+        ax2.plot(time[mask_roi], pup[mask_roi],  'r', lw=0.9, label='Upstream Pressure')
+        ax2.plot(time[mask_roi], pdwn[mask_roi], 'b', lw=0.9, label='Downstream Pressure')
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('Pressure (MPa)')
+        ax2.set_title('Click START and END points for REFINED ROI')
+        ax2.legend()
+        ax2.grid()
+        plt.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.1)
+        make_figure_topmost(fig2)
+    
+        # Get refined ROI
+        pts = fig2.ginput(2, timeout=-1)
+        tree = KDTree(np.column_stack((time, pup)))
+        idx = [tree.query(pt)[1] for pt in pts]
+    
+        
+    
+        # Plot selected range
+        plt.figure(2)
+        plt.clf()
+        plt.plot(time, pup, 'r', label='Upstream Pressure')
+        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
+        plt.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
+        plt.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Pressure (MPa)')
+        plt.title('Selected Data Range')
+        plt.legend()
+        plt.show()
+    
+        # Extract selected data
+        time = time[idx[0]:idx[1] + 1]
+        time=time-np.min(time)
+        pup = pup[idx[0]:idx[1] + 1]
+        pdwn = pdwn[idx[0]:idx[1] + 1]
+        # Fit and model
+        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N2boot,Tmin,Tmax)
+        plot_bootstrap_distributions(up_params_bs, dwn_params_bs, updata, dwndata, 3)
+        A = np.abs(dwndata[0] / updata[0])
+        Aerr = A * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
+        logAerr = np.abs(Aerr / A / np.log(10))
+        phi = updata[2]-dwndata[2]
+        phierr = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
+        T = updata[1]
+        if phi > np.pi:
+            phi -= 2 * np.pi
+        if phi < -np.pi:
+            phi += 2*np.pi
+            
+        upmodel = updata[3] + updata[0] * np.sin(time * 2 * np.pi / updata[1] + updata[2])
+        dwnmodel = dwndata[3] + updata[0]*A * np.sin(time * 2 * np.pi / updata[1] + updata[2]-phi)+dwndata[4]*time
+        
+       
+    
+        plt.figure(4)
+        plt.clf()
+        plt.plot(time, pup, 'r', label='Upstream Pressure')
+        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
+        plt.plot(time, upmodel, 'g', label='Up Model')
+        plt.plot(time, dwnmodel, 'm', label='Down Model')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Pressure (MPa)')
+        plt.title('Model Fit')
+        plt.legend()
+        plt.show()
+        plt.pause(0.01)
+        
+        
+        T_main=T
+        N=len(time_all)
+        del_t=(time_all[-1]-time_all[0])/(N-1)
+        fs=1/del_t
+        N_periods=np.floor((N*del_t)/T_main)
+        periods_2_proc=prompt("How many periods do you want to process?",5,cast=int)
+        N2proc=int(np.floor(periods_2_proc*T_main/del_t))
+        
+
+        # Initialize empty arrays
+        A = np.empty(0, dtype=float)
+        phi = np.empty(0, dtype=float)
+        Aerr = np.empty(0, dtype=float)
+        phierr = np.empty(0, dtype=float)
+        T = np.empty(0, dtype=float)
+        T_err = np.empty(0, dtype=float)
+        time2 = np.empty(0, dtype=float)
+        xi = np.empty(0, dtype=float)
+        eta = np.empty(0, dtype=float)
+        eta_err = np.empty(0, dtype=float)
+        xi_err = np.empty(0, dtype=float)
+        k = np.empty(0, dtype=float)
+        bc = np.empty(0, dtype=float)
+        k_err = np.empty(0, dtype=float)
+        bc_err = np.empty(0, dtype=float)
+        Pp = np.empty(0, dtype=float)
+        up_amp = np.empty(0, dtype=float)
+
+        m=0
+        n=N2proc+1
+        step=int(np.floor(T_main/del_t))
+        with tqdm(total=N, desc="Running While Loop") as pbar:
+            while n<N:
+                updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup_all[m:n], pdwn_all[m:n], time_all[m:n], N2boot,Tmin,Tmax)
+                Ai = np.abs(dwndata[0] / updata[0])
+                Aerri = Ai * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
+                
+                phii = updata[2]-dwndata[2]
+                phierri = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
+                Ti = updata[1]
+                if phii > np.pi:
+                    phii -= 2 * np.pi
+                if phii < -np.pi:
+                    phii += 2*np.pi
+                C,visc,bd,bd_err=permeant_props(permeant,Temp,updata[3],bd_mode,bd,bd_err,Dv,Dv_err)
+                xii, etai, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(Ai, phii, w)
+                eta_erri, xi_erri = bern_errors(x_sol, Ai,Aerr, phii, w, etai, xii,up_params_bs,dwn_params_bs)
+            
+                  
+                ki    = float((etai * np.pi * l * visc * bd) / (area * Ti))
+                k_erri = float(np.abs(ki) * np.sqrt(
+                    (eta_erri / etai)      ** 2 +
+                    (l_err   / l)        ** 2 +
+                    (bd_err  / bd)       ** 2 +
+                    (2 * dia_err / dia)  ** 2 +
+                    (up_err[1] / Ti)      ** 2
+                ))
+            
+                if xii == 0:
+                    bci     = 0.0
+                    bc_erri = np.nan
+                else:
+                    bci    = float((xii * bd) / (area * l))
+                    bc_erri = float(np.abs(bci) * np.sqrt(
+                        (xi_erri  / xii)       ** 2 +
+                        (bd_err  / bd)       ** 2 +
+                        (2 * dia_err / dia)  ** 2 +
+                        (l_err   / l)        ** 2
+                    ))
+                
+                
+                # --- INSIDE YOUR LOOP ---
+                A = np.append(A, Ai)
+                phi = np.append(phi, phii)
+                Aerr = np.append(Aerr, Aerri)
+                phierr = np.append(phierr, phierri)
+                T = np.append(T, Ti)
+                T_err = np.append(T_err, up_err[1])
+                time2 = np.append(time2, (time_all[n] + time_all[m]) / 2)
+                xi = np.append(xi, xii)
+                eta = np.append(eta, etai)
+                eta_err = np.append(eta_err, eta_erri)
+                xi_err = np.append(xi_err, xi_erri)
+                k = np.append(k, ki)
+                bc = np.append(bc, bci)
+                k_err = np.append(k_err, k_erri)
+                bc_err = np.append(bc_err, bc_erri)
+                Pp = np.append(Pp, updata[3])
+                up_amp = np.append(up_amp, updata[0])
+
+                
+                m+=step
+                n+=step
+                pbar.update(step)
+        
+        
+        plt.figure(5)
+        plt.clf()
+        ax1=plt.gca()
+        
+        # 2. Plot your first dataset
+        ax1.plot(time2, A, 'r', label='Gain')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Gain', color='r')  # Good practice to color-code labels
+        ax1.tick_params(axis='y', labelcolor='r')
+        
+        # 3. Create the twin axis
+        ax2 = ax1.twinx()
+        ax2.plot(time2, phi, 'b', label='Phase Shift rad')
+        ax2.set_ylabel('Phase Shift Rad', color='b')
+        ax2.tick_params(axis='y', labelcolor='b')
+        
+        # 4. Handle the combined legend (by default, they overwrite each other)
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        
+        plt.title('Phase and Gain')
+        plt.show()
+        plt.pause(0.01)
+        
+        plt.figure(6)
+        plt.clf()
+        ax1=plt.gca()
+        
+        # 2. Plot your first dataset
+        ax1.plot(time2, k, 'r', label='Perm')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Permeability m^2', color='r')  # Good practice to color-code labels
+        ax1.tick_params(axis='y', labelcolor='r')
+        
+        # 3. Create the twin axis
+        ax2 = ax1.twinx()
+        ax2.plot(time2, bc, 'b', label='Storage')
+        ax2.set_ylabel('Storage', color='b')
+        ax2.tick_params(axis='y', labelcolor='b')
+        
+        # 4. Handle the combined legend (by default, they overwrite each other)
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        
+        plt.show()
+        plt.pause(0.01)
+        
+        logAerr=np.abs(Aerr / A / np.log(10))
+        if first_loop == True:
+            nomo_ax = plot_nomo(7,no_leg='yes')   # returns main axis, store for all loops
+        # Always plot on the stored main axis (not twin ax2)
+        nomo_ax.errorbar(abs(phi), np.log10(A), xerr=phierr, yerr=logAerr,
+                         fmt='o', color='blue', zorder=5,
+                         label='_nolegend_')
+        
+        # Refresh figure layout cleanly
+        plt.figure(5).tight_layout()
+        plt.figure(5).canvas.draw_idle()
+        plt.pause(0.05)
+        
+        # Create and append DataFrame
+        file=os.path.basename(datafile)
+        output = pd.DataFrame({
+            'Time': time2,
+            'PoreP': Pp,
+            'UpAmp': up_amp,
+            'Gain': A,
+            'delA': Aerr,
+            'Phase': phi,
+            'delphi': phierr,
+            'Period': T,
+            'delT': T_err,
+            'eta': eta,
+            'deleta': eta_err,
+            'xi': xi,
+            'delxi': xi_err,
+            'Permeability': k,
+            'delk': k_err,
+            'Storage Capacity': bc,
+            'delbeta': bc_err 
+        })
+        file_name = os.path.basename(datafile)
+        output.to_csv(outfile, mode='w' if first_loop else 'a', header=first_loop, index=False)
+        print(f"\n{'=' * 60}")
+        print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
+        print(f"Permeability: {k[-1]:.3e} ± {k_err[-1]:.3e} m²")
+        print(f"Storage Capacity: {bc[-1]:.3e} ± {bc_err[-1]:.3e} Pa⁻¹")
+        print(f"{'=' * 60}")
+        
+        
+        first_loop = False
+        #if not ask_to_continue():
+        break
+plt.ioff()
+plt.show()
