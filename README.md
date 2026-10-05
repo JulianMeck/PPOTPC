@@ -118,7 +118,8 @@ When you run the script you will be asked:
 4) the script will chugg away and calculate permeability and display amplitude and phase shit on the nomogram.
 5) asked whether you want to process another data set if yes you goto step 2 above if no end
 6) output file is saved.
-
+## Continuous Data
+There is a new functionality in this version that allows you to calculate how the permeability varies with time. At command prompt you are asked if you want to process single or continuous data. If you select cont it will process the data to calculate time dependent permeability. The wave period should be constant over the whole data. First you will be asked to select a region of interest to calculate the initial parameters of the wave. I normally select 5 waves. Then it will ask now many waves you want in the window to calculate the permeability Ithe default is 5. Then it will calculate the permeability for a moving window of N waves and it will step the window a whole period. the data is the plotted on a timeseries and on the nomogram and the processed data is saved as a csv file.
 ## Acknowledgements
 This code has been under development for many years with involvement from a number of coleagues in Manchester and Liverpool including: Ernie Rutter, Rosanne McKernan, Kier Groves, Mike Chandler, Rochelle Taylor, Yusuf Bashir, Lining Yang, Pete Armitage, John Bedford... Note need to add more people from Liverpool.
 
