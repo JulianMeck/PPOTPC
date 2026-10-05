@@ -83,6 +83,11 @@ v7
   
 """
 import os
+
+# WSL/default workflow: use the same Tk-based GUI path as the stable main branch.
+os.environ.setdefault('MPLBACKEND', 'TkAgg')
+os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
+
 from tkinter import Tk
 from tkinter import filedialog
 from tkinter import messagebox
@@ -113,6 +118,8 @@ from iapws import IAPWS95
 from iapws import _iapws
 from argon import Argon_Z
 from argon import argon_visc
+import configparser
+from pathlib import Path
 import numdifftools as nd
 #import time as time_py
 from tqdm import tqdm
@@ -130,7 +137,7 @@ except Exception:
 
 print("=" * 60)
 print("PPO Permeability Processing - Modified Version")
-print("Using downstream storage capacity (bd) as direct input")
+print("Using config-file workflow with dat/mat input and bd/Dv storage")
 print("Dialogs and plots will appear ON TOP of other windows")
 print("=" * 60)
 
@@ -989,659 +996,815 @@ def prompt(message, default, cast=float):
     return cast(raw)
 
 
-print("\n" + "=" * 60)
-print("SAMPLE PARAMETERS")
-print("=" * 60)
-print("(Press Enter to accept the default value shown in brackets)\n")
+def tile_figure(fig_num, row, col, tot_rows=2, tot_cols=3, row_span=1, col_span=1):
+    """
+    Position a Matplotlib figure in a screen tile when the active GUI backend
+    exposes a window geometry API. This preserves the v3 multi-window layout
+    without making the script backend-specific.
+    """
+    try:
+        fig = plt.figure(fig_num)
+        manager = fig.canvas.manager
+        window = getattr(manager, 'window', None)
+        if window is None:
+            return
 
-# -- Sample geometry --
-l        = prompt("Sample length (mm)",                  100)
-l_err    = prompt("Error on length (m)",                 5e-4)
-dia      = prompt("Sample diameter (mm)",                20)
-dia_err  = prompt("Error on diameter (mm)",              0.5)
+        # Tk backends
+        if hasattr(window, 'winfo_screenwidth') and hasattr(window, 'geometry'):
+            screen_w = window.winfo_screenwidth()
+            screen_h = window.winfo_screenheight()
+            tile_w = int(screen_w / tot_cols)
+            tile_h = int((screen_h - 60) / tot_rows)
+            x_pos = col * tile_w
+            y_pos = row * tile_h
+            window_w = tile_w * col_span
+            window_h = tile_h * row_span
+            window.geometry(f"{window_w}x{window_h}+{x_pos}+{y_pos}")
+            return
 
-# -- Downstream storage mode --
-# ── CHANGE v4 [3]: downstream storage — bd direct or Dv × C(T,P) ────────────
-# v3 always computed bd = Dv × C(T,P) internally.  v4 lets the user choose:
-#   bd  — enter bd directly (water / incompressible fluids)
-#   Dv  — enter downstream volume; bd recomputed per measurement from the
-#          actual pore pressure (argon / compressible fluids where C(P) varies)
-print()
-print("  Downstream storage capacity mode:")
-print("    bd  — enter bd directly (recommended for incompressible fluids, e.g. water)")
-print("    Dv  — enter downstream volume; bd = Dv × C(T,P) computed per measurement")
-print("          (recommended for compressible fluids, e.g. argon)")
-print()
-while True:
-    bd_mode = input("  Choose mode [bd / Dv]: ").strip().lower()
-    
-    # If the user just hits Enter, set the default to 'dv'
-    if bd_mode == "":
-        bd_mode = "dv"
-        
-    if bd_mode in ('bd', 'dv'):
-        break
-        
-    print("   Please type  bd  or  Dv")
-
-if bd_mode == 'bd':
-    bd      = prompt("Downstream storage capacity bd (m³/Pa)", 2.2522378352e-15)
-    bd_err  = prompt("Error on bd (m³/Pa)",                    5e-17)
-    Dv      = None   # not used
-    Dv_err  = None
-else:
-    Dv      = prompt("Downstream volume Dv (m³)",   9.6085e-6)
-    Dv_err  = prompt("Error on Dv (m³)",            0.01e-6)
-    bd      = None   # will be computed per measurement
-    bd_err  = None
-# ── END CHANGE v4 [3] ────────────────────────────────────────────────────────
-
-# -- Experiment conditions --
-Temp     = prompt("Temperature (K)",                     423.15)
-
-valid_permeants = ('water', 'argon', 'rheolube')
-while True:
-    permeant = prompt("Permeant fluid [water / argon / rheolube]", "water", cast=str)
-    if permeant in valid_permeants:
-        break
-    print(f"  ⚠  Invalid choice '{permeant}'. Please enter one of: {valid_permeants}")
-
-print("\n" + "=" * 60)
-print("DATA FILE COLUMN INDICES  (0-based)")
-print("=" * 60)
-HeaderRows = prompt("Number of header rows to skip",     3,  cast=int)
-time_col   = prompt("Time column index",                 0,  cast=int)
-Pup_col    = prompt("Upstream pressure column index",    1,  cast=int)
-Pdwn_col   = prompt("Downstream pressure column index",  2,  cast=int)
-Pc_col     = prompt("Confining pressure column index",   3,  cast=int)
-
-print("\n" + "=" * 60)
-print("FITTING PARAMETERS")
-print("=" * 60)
-N2boot    = prompt("Number of bootstrap resamples",           20,     cast=int)
-w    = prompt("A/phi weighting factor (0=A only, 1=phi only, 0.5=equal)", 0.5)
-Tmin = prompt("Minimum oscillation period to search (s)", 100,   cast=float)
-Tmax = prompt("Maximum oscillation period to search (s)", 10000, cast=int)
-valid_proc_type = ('sin','cont')
-while True:
-    proc_type = prompt("Is data a single perm measurement [sin] or continuous [cont]?","sin",cast=str)
-    if proc_type in valid_proc_type:
-        break
-    print(f"  ⚠  Invalid choice '{proc_type}'. Please enter one of: {valid_proc_type}")
+        # Qt backends
+        if hasattr(window, 'screen') and hasattr(window, 'setGeometry'):
+            screen = window.screen().availableGeometry()
+            tile_w = int(screen.width() / tot_cols)
+            tile_h = int((screen.height() - 60) / tot_rows)
+            x_pos = int(screen.x() + col * tile_w)
+            y_pos = int(screen.y() + row * tile_h)
+            window_w = tile_w * col_span
+            window_h = tile_h * row_span
+            window.setGeometry(x_pos, y_pos, window_w, window_h)
+    except Exception:
+        pass
 
 
-# -- Unit conversions (done after user input) --
-l    = l / 1000                            # mm → m
-area = np.pi * (dia / 2000) ** 2          # mm diameter → m² area
+def _config_has(config, sections, option):
+    """Return True if option exists in any of the supplied config sections."""
+    if isinstance(sections, str):
+        sections = (sections,)
+    return any(config.has_option(section, option) for section in sections)
 
-print("\n" + "=" * 60)
-print("Input summary")
-print("=" * 60)
-print(f"  Sample:      l = {l*1000:.3f} mm  |  dia = {dia:.3f} mm")
-if bd_mode == 'bd':
-    print(f"  Storage:     bd = {bd:.3e} m³/Pa  ±  {bd_err:.3e}  [direct input]")
-else:
-    print(f"  Storage:     Dv = {Dv:.3e} m³  ±  {Dv_err:.3e}  →  bd = Dv×C(T,P) per measurement")
-print(f"  Conditions:  T = {Temp} K  |  permeant = {permeant}")
-print(f"  Columns:     time={time_col}  Pup={Pup_col}  Pdwn={Pdwn_col}  Pc={Pc_col}  header_rows={HeaderRows}")
-print(f"  Fitting:     N={N2boot}  w={w}  Tmin={Tmin} s  Tmax={Tmax} s")
-print("=" * 60)
-# Ensure no matplotlib figures are open before spawning the tkinter dialog.
-# On re-runs inside the same session (Spyder / IPython) stale figure windows
-# hold a tkinter event loop that makes filedialog hang indefinitely.
-plt.close('all')
-try:
-    plt.pause(0.3)
-except Exception:
-    pass
 
-# Prompt user to select output file location once
-print("\n" + "=" * 60)
-print("STEP 1: Please select where to SAVE the output CSV file")
-print("=" * 60)
-root = create_topmost_root()
-outfile = filedialog.asksaveasfilename(
-    defaultextension=".csv",
-    filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xls"), ("all files", "*.*")],
-    title="Output File",
-    initialfile="datafile_proc.csv"
-)
-root.destroy()
-plt.ion()
-if not outfile:
-    print("Save operation cancelled.")
-elif proc_type == 'sin':
+def _config_get(config, sections, option, cast=str, default=None, required=False):
+    """Read one value from the first section containing option."""
+    if isinstance(sections, str):
+        sections = (sections,)
+
+    for section in sections:
+        if not config.has_option(section, option):
+            continue
+        if cast is float:
+            return config.getfloat(section, option)
+        if cast is int:
+            return config.getint(section, option)
+        if cast is bool:
+            return config.getboolean(section, option)
+        value = config.get(section, option)
+        return value.strip() if isinstance(value, str) else value
+
+    if required:
+        section_list = ", ".join(sections)
+        raise KeyError(f"Missing required config value: {section_list}.{option}")
+    return default
+
+
+def prompt_processing_parameters():
+    """Interactive fallback used when no matching .ini file is available."""
+    print("\n" + "=" * 60)
+    print("SAMPLE PARAMETERS")
+    print("=" * 60)
+    print("(Press Enter to accept the default value shown in brackets)\n")
+
+    params = {}
+    params['l']       = prompt("Sample length (mm)",                  100)
+    params['l_err']   = prompt("Error on length (m)",                 5e-4)
+    params['dia']     = prompt("Sample diameter (mm)",                20)
+    params['dia_err'] = prompt("Error on diameter (mm)",              0.5)
+
+    print()
+    print("  Downstream storage capacity mode:")
+    print("    bd  — enter bd directly (recommended for incompressible fluids, e.g. water)")
+    print("    Dv  — enter downstream volume; bd = Dv × C(T,P) computed per measurement")
+    print("          (recommended for compressible fluids, e.g. argon)")
+    print()
+    while True:
+        bd_mode = input("  Choose mode [bd / Dv]: ").strip().lower()
+        if bd_mode == "":
+            bd_mode = "dv"
+        if bd_mode in ('bd', 'dv'):
+            break
+        print("   Please type  bd  or  Dv")
+
+    params['bd_mode'] = bd_mode
+    if bd_mode == 'bd':
+        params['bd']     = prompt("Downstream storage capacity bd (m³/Pa)", 2.2522378352e-15)
+        params['bd_err'] = prompt("Error on bd (m³/Pa)",                    5e-17)
+        params['Dv']     = None
+        params['Dv_err'] = None
+    else:
+        params['Dv']     = prompt("Downstream volume Dv (m³)",   9.6085e-6)
+        params['Dv_err'] = prompt("Error on Dv (m³)",            0.01e-6)
+        params['bd']     = None
+        params['bd_err'] = None
+
+    params['Temp'] = prompt("Temperature (K)", 423.15)
+
+    valid_permeants = ('water', 'argon', 'rheolube')
+    while True:
+        permeant = prompt("Permeant fluid [water / argon / rheolube]", "water", cast=str).strip().lower()
+        if permeant in valid_permeants:
+            params['permeant'] = permeant
+            break
+        print(f"  ⚠  Invalid choice '{permeant}'. Please enter one of: {valid_permeants}")
+
+    print("\n" + "=" * 60)
+    print("DATA FILE INPUT")
+    print("=" * 60)
+    while True:
+        file_mode = prompt("Data file mode [dat / mat]", "dat", cast=str).strip().lower()
+        if file_mode in ('dat', 'mat'):
+            params['file_mode'] = file_mode
+            break
+        print("  ⚠  Invalid choice. Please enter 'dat' or 'mat'.")
+
+    if params['file_mode'] == 'dat':
+        print("\nDATA FILE COLUMN INDICES  (0-based)")
+        params['HeaderRows'] = prompt("Number of header rows to skip",     3,  cast=int)
+        params['time_col']   = prompt("Time column index",                 0,  cast=int)
+        params['Pup_col']    = prompt("Upstream pressure column index",    1,  cast=int)
+        params['Pdwn_col']   = prompt("Downstream pressure column index",  2,  cast=int)
+        params['Pc_col']     = prompt("Confining pressure column index",   3,  cast=int)
+    else:
+        print("\nMATLAB VARIABLE NAMES")
+        params['time_var']   = prompt("Time variable", "Time", cast=str).strip()
+        params['Pup_var']    = prompt("Upstream pressure variable", "PumpPressure", cast=str).strip()
+        params['Pdwn_var']   = prompt("Downstream pressure variable", "Pf", cast=str).strip()
+        params['Pc_var']     = prompt("Confining pressure variable", "Normal", cast=str).strip()
+        params['time_scale'] = prompt("Time scale factor", 0.001)
+        params['Pup_scale']  = prompt("Upstream pressure scale factor", 1.0)
+        params['Pdwn_scale'] = prompt("Downstream pressure scale factor", 1.0)
+        params['Pc_scale']   = prompt("Confining pressure scale factor", 1.0)
+
+    print("\n" + "=" * 60)
+    print("FITTING PARAMETERS")
+    print("=" * 60)
+    params['N']    = prompt("Number of bootstrap resamples",           20,     cast=int)
+    params['w']    = prompt("A/phi weighting factor (0=A only, 1=phi only, 0.5=equal)", 0.5)
+    params['Tmin'] = prompt("Minimum oscillation period to search (s)", 100,    cast=float)
+    params['Tmax'] = prompt("Maximum oscillation period to search (s)", 10000,  cast=float)
+
+    valid_proc_type = ('sin', 'cont')
+    while True:
+        proc_type = prompt("Is data a single perm measurement [sin] or continuous [cont]?", "sin", cast=str).strip().lower()
+        if proc_type in valid_proc_type:
+            params['proc_type'] = proc_type
+            break
+        print(f"  ⚠  Invalid choice '{proc_type}'. Please enter one of: {valid_proc_type}")
+
+    params['periods_2_proc'] = None
+    if params['proc_type'] == 'cont':
+        params['periods_2_proc'] = prompt("How many periods do you want to process?", 5, cast=int)
+
+    params['config_file'] = None
+    return params
+
+
+def load_processing_config(datafile):
+    """
+    Load processing parameters using the config-file workflow.
+
+    Search order:
+      1. <selected-data-file>.ini
+      2. config.ini beside this script
+      3. interactive prompts
+
+    Storage fields belong in [Storage]: mode plus either Dv/Dv_err or
+    bd/bd_err. Legacy configs using bd_mode, or with Dv/bd under [Sample],
+    are still accepted as fallbacks. New configs should keep all
+    downstream-storage settings together in [Storage].
+    """
+    script_root = Path(__file__).resolve().parent
+    data_path = Path(datafile)
+    candidates = [data_path.with_suffix('.ini'), script_root / 'config.ini']
+
+    config_file = next((candidate for candidate in candidates if candidate.exists()), None)
+    if config_file is None:
+        print("\nNo matching .ini file found; falling back to interactive parameter prompts.")
+        return prompt_processing_parameters()
+
+    config = configparser.ConfigParser(inline_comment_prefixes=('#', ';'))
+    config.read(config_file)
+
+    params = {
+        'config_file': str(config_file),
+        'l':          _config_get(config, 'Sample',     'l',          float, required=True),
+        'l_err':      _config_get(config, 'Sample',     'l_err',      float, required=True),
+        'dia':        _config_get(config, 'Sample',     'dia',        float, required=True),
+        'dia_err':    _config_get(config, 'Sample',     'dia_err',    float, required=True),
+        'Temp':       _config_get(config, 'Experiment', 'Temp',       float, required=True),
+        'permeant':   _config_get(config, 'Experiment', 'permeant',   str,   required=True).strip().lower(),
+        'N':          _config_get(config, 'Fitting',    'N',          int,   required=True),
+        'w':          _config_get(config, 'Fitting',    'w',          float, required=True),
+        'Tmin':       _config_get(config, 'Fitting',    'Tmin',       float, required=True),
+        'Tmax':       _config_get(config, 'Fitting',    'Tmax',       float, required=True),
+    }
+
+    proc_type = _config_get(config, ('Processing', 'Fitting'), 'proc_type', str, default=None)
+    if proc_type is None:
+        proc_type = _config_get(config, ('Processing', 'Fitting'), 'type', str, default='sin')
+    proc_type = proc_type.strip().lower()
+    if proc_type not in ('sin', 'cont'):
+        raise ValueError(f"Invalid processing type '{proc_type}' in {config_file}; use 'sin' or 'cont'.")
+    params['proc_type'] = proc_type
+    params['periods_2_proc'] = _config_get(config, ('Processing', 'Fitting'), 'periods_2_proc', int, default=None)
+
+    file_mode = _config_get(config, 'File', 'mode', str, default=None)
+    if file_mode is None:
+        # Legacy fallback: infer from the selected data-file extension.
+        file_mode = 'mat' if data_path.suffix.lower() == '.mat' else 'dat'
+    file_mode = file_mode.strip().lower()
+    if file_mode not in ('dat', 'mat'):
+        raise ValueError(f"Invalid file mode '{file_mode}' in {config_file}; use 'dat' or 'mat'.")
+    params['file_mode'] = file_mode
+
+    if file_mode == 'dat':
+        params.update({
+            'HeaderRows': _config_get(config, 'File', 'HeaderRows', int, required=True),
+            'time_col':   _config_get(config, 'File', 'time_col',   int, required=True),
+            'Pup_col':    _config_get(config, 'File', 'Pup_col',    int, required=True),
+            'Pdwn_col':   _config_get(config, 'File', 'Pdwn_col',   int, required=True),
+            'Pc_col':     _config_get(config, 'File', 'Pc_col',     int, required=True),
+        })
+    else:
+        params.update({
+            'time_var':   _config_get(config, 'File', 'time_var',   str,   required=True),
+            'Pup_var':    _config_get(config, 'File', 'Pup_var',    str,   required=True),
+            'Pdwn_var':   _config_get(config, 'File', 'Pdwn_var',   str,   required=True),
+            'Pc_var':     _config_get(config, 'File', 'Pc_var',     str,   required=True),
+            'time_scale': _config_get(config, 'File', 'time_scale', float, default=1.0),
+            'Pup_scale':  _config_get(config, 'File', 'Pup_scale',  float, default=1.0),
+            'Pdwn_scale': _config_get(config, 'File', 'Pdwn_scale', float, default=1.0),
+            'Pc_scale':   _config_get(config, 'File', 'Pc_scale',   float, default=1.0),
+        })
+
+    storage_sections = ('Storage', 'Sample')
+    bd_mode = _config_get(config, storage_sections, 'mode', str, default=None)
+    if bd_mode is None:
+        bd_mode = _config_get(config, storage_sections, 'bd_mode', str, default=None)
+
+    has_bd = _config_has(config, storage_sections, 'bd')
+    if bd_mode is None:
+        bd_mode = 'bd' if has_bd else 'dv'
+
+    bd_mode = bd_mode.strip().lower()
+    if bd_mode in ('downstream_volume', 'volume'):
+        bd_mode = 'dv'
+    if bd_mode not in ('bd', 'dv'):
+        raise ValueError(f"Invalid downstream storage mode '{bd_mode}' in {config_file}; use 'bd' or 'Dv'.")
+
+    params['bd_mode'] = bd_mode
+    if bd_mode == 'bd':
+        params['bd']     = _config_get(config, storage_sections, 'bd',     float, required=True)
+        params['bd_err'] = _config_get(config, storage_sections, 'bd_err', float, default=0.0)
+        params['Dv']     = None
+        params['Dv_err'] = None
+    else:
+        params['Dv']     = _config_get(config, storage_sections, 'Dv',     float, required=True)
+        params['Dv_err'] = _config_get(config, storage_sections, 'Dv_err', float, default=0.0)
+        params['bd']     = None
+        params['bd_err'] = None
+
+    return params
+
+
+def print_input_summary(params, datafile):
+    """Print a compact per-file processing summary."""
+    print("\n" + "=" * 60)
+    print("Input summary")
+    print("=" * 60)
+    if params.get('config_file'):
+        print(f"  Config:      {params['config_file']}")
+    else:
+        print("  Config:      interactive prompts")
+    print(f"  Data file:   {os.path.basename(datafile)}")
+    print(f"  Processing:  {params['proc_type']}")
+    print(f"  Sample:      l = {params['l']:.3f} mm  |  dia = {params['dia']:.3f} mm")
+    if params['bd_mode'] == 'bd':
+        print(f"  Storage:     bd = {params['bd']:.3e} m³/Pa  ±  {params['bd_err']:.3e}  [direct input]")
+    else:
+        print(f"  Storage:     Dv = {params['Dv']:.3e} m³  ±  {params['Dv_err']:.3e}  →  bd = Dv×C(T,P) per measurement")
+    print(f"  Conditions:  T = {params['Temp']} K  |  permeant = {params['permeant']}")
+    print(f"  File mode:   {params['file_mode']}")
+    if params['file_mode'] == 'dat':
+        print(
+            "  Columns:     "
+            f"time={params['time_col']}  Pup={params['Pup_col']}  "
+            f"Pdwn={params['Pdwn_col']}  Pc={params['Pc_col']}  "
+            f"header_rows={params['HeaderRows']}"
+        )
+    else:
+        print(
+            "  Variables:   "
+            f"time={params['time_var']}  Pup={params['Pup_var']}  "
+            f"Pdwn={params['Pdwn_var']}  Pc={params['Pc_var']}"
+        )
+    print(f"  Fitting:     N={params['N']}  w={params['w']}  Tmin={params['Tmin']} s  Tmax={params['Tmax']} s")
+    if params['proc_type'] == 'cont' and params.get('periods_2_proc') is not None:
+        print(f"  Continuous:  periods per window = {params['periods_2_proc']}")
+    print("=" * 60)
+
+
+def _mat_vector(mat_data, var_name, scale=1.0):
+    """Return one MATLAB variable as a 1-D float array with optional scaling."""
+    if var_name not in mat_data:
+        available = sorted(k for k in mat_data if not k.startswith('__'))
+        raise KeyError(
+            f"Variable '{var_name}' not found in .mat file. Available variables: {available}"
+        )
+
+    values = np.asarray(mat_data[var_name]).squeeze()
+    if not np.issubdtype(values.dtype, np.number):
+        raise TypeError(f"Variable '{var_name}' is not numeric.")
+    if values.ndim != 1:
+        raise ValueError(
+            f"Variable '{var_name}' must be a vector after squeezing; got shape {values.shape}."
+        )
+    return values.astype(float) * scale
+
+
+def load_experiment_data(datafile, params):
+    """Load time, upstream pressure, downstream pressure, and confining pressure."""
+    if params['file_mode'] == 'dat':
+        all_file = np.loadtxt(datafile, delimiter='\t', skiprows=params['HeaderRows'])
+        time = all_file[:, params['time_col']]
+        pup = all_file[:, params['Pup_col']]
+        pdwn = all_file[:, params['Pdwn_col']]
+        pc = np.mean(all_file[:, params['Pc_col']])
+        return time, pup, pdwn, pc
+
+    try:
+        mat_data = scipy.io.loadmat(datafile, squeeze_me=True, struct_as_record=False)
+    except NotImplementedError as exc:
+        raise RuntimeError(
+            "This .mat file appears to be MATLAB v7.3/HDF5. "
+            "scipy.io.loadmat cannot read it; save as v7.2 or add an h5py/mat73 reader."
+        ) from exc
+
+    time = _mat_vector(mat_data, params['time_var'], params['time_scale'])
+    pup = _mat_vector(mat_data, params['Pup_var'], params['Pup_scale'])
+    pdwn = _mat_vector(mat_data, params['Pdwn_var'], params['Pdwn_scale'])
+    pc_values = _mat_vector(mat_data, params['Pc_var'], params['Pc_scale'])
+
+    lengths = {len(time), len(pup), len(pdwn), len(pc_values)}
+    if len(lengths) != 1:
+        raise ValueError(
+            "Configured .mat variables do not have the same length: "
+            f"time={len(time)}, Pup={len(pup)}, Pdwn={len(pdwn)}, Pc={len(pc_values)}"
+        )
+
+    pc = np.mean(pc_values)
+    return time, pup, pdwn, pc
+
+
+def select_roi(time, pup, pdwn):
+    """Interactively select and refine a region of interest."""
+    print("\nSTEP 3: Interactive plot will appear")
+    print("        Click 2 points to select COARSE region of interest")
+
+    _fig1 = plt.figure(1)
+    _fig1.clf()
+    fig, ax = plt.subplots(num=1, clear=True)
+    ax.plot(time, pup, 'r', label='Upstream Pressure')
+    ax.plot(time, pdwn, 'b', label='Downstream Pressure')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Pressure (MPa)')
+    ax.set_title('Click start and end points for coarse ROI')
+    ax.legend()
+    ax.grid()
+    tile_figure(1, row=0, col=0)
+    make_figure_topmost(fig)
+    plt.show(block=False)
+    plt.pause(0.1)
+
+    pts = fig.ginput(2, timeout=-1)
+    tree = KDTree(np.column_stack((time, pup)))
+    idx = [tree.query(pt)[1] for pt in pts]
+
+    plt.close(fig)
+    mask_roi = (time >= time[idx[0]]) & (time <= time[idx[1]])
+    _fig10 = plt.figure(10)
+    _fig10.clf()
+    fig2, ax2 = plt.subplots(num=10, figsize=(12, 5), clear=True)
+    ax2.plot(time[mask_roi], pup[mask_roi],  'r', lw=0.9, label='Upstream Pressure')
+    ax2.plot(time[mask_roi], pdwn[mask_roi], 'b', lw=0.9, label='Downstream Pressure')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Pressure (MPa)')
+    ax2.set_title('Click START and END points for REFINED ROI')
+    ax2.legend()
+    ax2.grid()
+    tile_figure(10, row=0, col=0)
+    make_figure_topmost(fig2)
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(0.1)
+
+    pts = fig2.ginput(2, timeout=-1)
+    tree = KDTree(np.column_stack((time, pup)))
+    idx = [tree.query(pt)[1] for pt in pts]
+
+    fig_selected = plt.figure(2)
+    fig_selected.clf()
+    plt.plot(time, pup, 'r', label='Upstream Pressure')
+    plt.plot(time, pdwn, 'b', label='Downstream Pressure')
+    plt.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
+    plt.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Pressure (MPa)')
+    plt.title('Selected Data Range')
+    plt.legend()
+    tile_figure(2, row=0, col=1)
+    make_figure_topmost(fig_selected)
+    plt.show(block=False)
+    plt.pause(0.1)
+    return idx
+
+
+def fit_selected_window(time, pup, pdwn, idx, params):
+    """Fit upstream/downstream signals in the selected ROI."""
+    time_sel = time[idx[0]:idx[1] + 1]
+    time_sel = time_sel - np.min(time_sel)
+    pup_sel = pup[idx[0]:idx[1] + 1]
+    pdwn_sel = pdwn[idx[0]:idx[1] + 1]
+
+    updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(
+        pup_sel, pdwn_sel, time_sel, params['N'], params['Tmin'], params['Tmax']
+    )
+    plot_bootstrap_distributions(up_params_bs, dwn_params_bs, updata, dwndata, 3)
+
+    A = np.abs(dwndata[0] / updata[0])
+    Aerr = A * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
+    logAerr = np.abs(Aerr / A / np.log(10))
+    phi = updata[2] - dwndata[2]
+    phierr = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
+    T = updata[1]
+    if phi > np.pi:
+        phi -= 2 * np.pi
+    if phi < -np.pi:
+        phi += 2 * np.pi
+
+    upmodel = updata[3] + updata[0] * np.sin(time_sel * 2 * np.pi / updata[1] + updata[2])
+    dwnmodel = dwndata[3] + updata[0] * A * np.sin(time_sel * 2 * np.pi / updata[1] + updata[2] - phi) + dwndata[4] * time_sel
+
+    fig_model = plt.figure(4)
+    fig_model.clf()
+    plt.plot(time_sel, pup_sel, 'r', label='Upstream Pressure')
+    plt.plot(time_sel, pdwn_sel, 'b', label='Downstream Pressure')
+    plt.plot(time_sel, upmodel, 'g', label='Up Model')
+    plt.plot(time_sel, dwnmodel, 'm', label='Down Model')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Pressure (MPa)')
+    plt.title('Model Fit')
+    plt.legend()
+    tile_figure(4, row=1, col=0)
+    make_figure_topmost(fig_model)
+    plt.show(block=False)
+    plt.pause(0.1)
+
+    return {
+        'time': time_sel,
+        'pup': pup_sel,
+        'pdwn': pdwn_sel,
+        'updata': updata,
+        'dwndata': dwndata,
+        'up_err': up_err,
+        'dwn_err': dwn_err,
+        'up_params_bs': up_params_bs,
+        'dwn_params_bs': dwn_params_bs,
+        'A': A,
+        'Aerr': Aerr,
+        'logAerr': logAerr,
+        'phi': phi,
+        'phierr': phierr,
+        'T': T,
+    }
+
+
+def compute_bernabe_outputs(A, Aerr, phi, up_params_bs, dwn_params_bs, params, l, area, up_pressure, T, up_period_err):
+    """Compute eta/xi, permeability, storage capacity, and uncertainties."""
+    C, visc, bd, bd_err = permeant_props(
+        params['permeant'], params['Temp'], up_pressure,
+        params['bd_mode'], params['bd'], params['bd_err'], params['Dv'], params['Dv_err']
+    )
+    xi, eta, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(A, phi, params['w'])
+    eta_err, xi_err = bern_errors(x_sol, A, Aerr, phi, params['w'], eta, xi, up_params_bs, dwn_params_bs)
+
+    k = float((eta * np.pi * l * visc * bd) / (area * T))
+    kerr = float(np.abs(k) * np.sqrt(
+        (eta_err / eta)      ** 2 +
+        (params['l_err'] / l) ** 2 +
+        (bd_err  / bd)       ** 2 +
+        (2 * params['dia_err'] / params['dia']) ** 2 +
+        (up_period_err / T)  ** 2
+    ))
+
+    if xi == 0:
+        bc = 0.0
+        bc_err = np.nan
+    else:
+        bc = float((xi * bd) / (area * l))
+        bc_err = float(np.abs(bc) * np.sqrt(
+            (xi_err  / xi)       ** 2 +
+            (bd_err  / bd)       ** 2 +
+            (2 * params['dia_err'] / params['dia']) ** 2 +
+            (params['l_err'] / l) ** 2
+        ))
+
+    return {
+        'C': C, 'visc': visc, 'bd': bd, 'bd_err': bd_err,
+        'xi': xi, 'eta': eta, 'Afit': Afit, 'phifit': phifit,
+        'A0': A0, 'phi0': phi0, 'x_sol': x_sol,
+        'eta_err': eta_err, 'xi_err': xi_err,
+        'k': k, 'kerr': kerr, 'bc': bc, 'bc_err': bc_err,
+    }
+
+
+def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
+    time, pup, pdwn, pc = load_experiment_data(datafile, params)
+    idx = select_roi(time, pup, pdwn)
+    fit = fit_selected_window(time, pup, pdwn, idx, params)
+
+    l = params['l'] / 1000
+    area = np.pi * (params['dia'] / 2000) ** 2
+    bern = compute_bernabe_outputs(
+        fit['A'], fit['Aerr'], fit['phi'], fit['up_params_bs'], fit['dwn_params_bs'],
+        params, l, area, fit['updata'][3], fit['T'], fit['up_err'][1]
+    )
+
+    if first_loop:
+        nomo_ax = plot_nomo(5)
+    nomo_ax.errorbar(abs(fit['phi']), np.log10(fit['A']), xerr=fit['phierr'], yerr=fit['logAerr'],
+                     fmt='o', color='blue', zorder=5, label='_nolegend_')
+    nomo_ax.plot(bern['phi0'], np.log10(bern['A0']), '^', color='g', zorder=5, label='_nolegend_')
+    nomo_ax.plot(bern['phifit'], np.log10(bern['Afit']), 'x', color='r',
+                 markersize=8, markeredgewidth=2, zorder=5, label='_nolegend_')
+    tile_figure(5, row=1, col=1)
+    plt.figure(5).tight_layout()
+    plt.figure(5).canvas.draw_idle()
+    plt.pause(0.05)
+
+    file = os.path.basename(datafile)
+    output = pd.DataFrame([{
+        'File': file,
+        'start index': idx[0],
+        'end index': idx[1],
+        'ConfP': pc,
+        'PoreP': fit['updata'][3],
+        'UpAmp': fit['updata'][0],
+        'Gain': fit['A'],
+        'delA': fit['Aerr'],
+        'Phase': fit['phi'],
+        'delphi': fit['phierr'],
+        'Period': fit['T'],
+        'delT': fit['up_err'][1],
+        'eta': bern['eta'],
+        'deleta': bern['eta_err'],
+        'xi': bern['xi'],
+        'delxi': bern['xi_err'],
+        'Permeability': bern['k'],
+        'delk': bern['kerr'],
+        'Storage Capacity': bern['bc'],
+        'delbeta': bern['bc_err']
+    }])
+    output.to_csv(outfile, mode='w' if first_loop else 'a', header=first_loop, index=False)
+
+    print(f"\n{'=' * 60}")
+    print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
+    print(f"Permeability: {bern['k']:.3e} ± {bern['kerr']:.3e} m²")
+    print(f"Storage Capacity: {bern['bc']:.3e} ± {bern['bc_err']:.3e} Pa⁻¹")
+    print(f"{'=' * 60}")
+    return nomo_ax
+
+
+def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
+    time_all, pup_all, pdwn_all, pc = load_experiment_data(datafile, params)
+    idx = select_roi(time_all, pup_all, pdwn_all)
+    fit = fit_selected_window(time_all, pup_all, pdwn_all, idx, params)
+
+    T_main = fit['T']
+    N = len(time_all)
+    del_t = (time_all[-1] - time_all[0]) / (N - 1)
+    periods_2_proc = params.get('periods_2_proc')
+    if periods_2_proc is None:
+        periods_2_proc = prompt("How many periods do you want to process?", 5, cast=int)
+    N2proc = int(np.floor(periods_2_proc * T_main / del_t))
+    step = int(np.floor(T_main / del_t))
+    if step < 1:
+        raise ValueError("Continuous processing step is <1 sample; check period/time units.")
+
+    A = np.empty(0, dtype=float)
+    phi = np.empty(0, dtype=float)
+    Aerr = np.empty(0, dtype=float)
+    phierr = np.empty(0, dtype=float)
+    T = np.empty(0, dtype=float)
+    T_err = np.empty(0, dtype=float)
+    time2 = np.empty(0, dtype=float)
+    xi = np.empty(0, dtype=float)
+    eta = np.empty(0, dtype=float)
+    eta_err = np.empty(0, dtype=float)
+    xi_err = np.empty(0, dtype=float)
+    k = np.empty(0, dtype=float)
+    bc = np.empty(0, dtype=float)
+    k_err = np.empty(0, dtype=float)
+    bc_err = np.empty(0, dtype=float)
+    Pp = np.empty(0, dtype=float)
+    up_amp = np.empty(0, dtype=float)
+
+    l = params['l'] / 1000
+    area = np.pi * (params['dia'] / 2000) ** 2
+
+    m = 0
+    n = N2proc + 1
+    with tqdm(total=N, desc="Continuous processing") as pbar:
+        while n < N:
+            updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(
+                pup_all[m:n], pdwn_all[m:n], time_all[m:n], params['N'], params['Tmin'], params['Tmax']
+            )
+            Ai = np.abs(dwndata[0] / updata[0])
+            Aerri = Ai * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
+            phii = updata[2] - dwndata[2]
+            phierri = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
+            Ti = updata[1]
+            if phii > np.pi:
+                phii -= 2 * np.pi
+            if phii < -np.pi:
+                phii += 2 * np.pi
+
+            bern = compute_bernabe_outputs(
+                Ai, Aerri, phii, up_params_bs, dwn_params_bs,
+                params, l, area, updata[3], Ti, up_err[1]
+            )
+
+            A = np.append(A, Ai)
+            phi = np.append(phi, phii)
+            Aerr = np.append(Aerr, Aerri)
+            phierr = np.append(phierr, phierri)
+            T = np.append(T, Ti)
+            T_err = np.append(T_err, up_err[1])
+            time2 = np.append(time2, (time_all[n] + time_all[m]) / 2)
+            xi = np.append(xi, bern['xi'])
+            eta = np.append(eta, bern['eta'])
+            eta_err = np.append(eta_err, bern['eta_err'])
+            xi_err = np.append(xi_err, bern['xi_err'])
+            k = np.append(k, bern['k'])
+            bc = np.append(bc, bern['bc'])
+            k_err = np.append(k_err, bern['kerr'])
+            bc_err = np.append(bc_err, bern['bc_err'])
+            Pp = np.append(Pp, updata[3])
+            up_amp = np.append(up_amp, updata[0])
+
+            m += step
+            n += step
+            pbar.update(step)
+
+    plt.figure(5)
+    plt.clf()
+    ax1 = plt.gca()
+    ax1.plot(time2, A, 'r', label='Gain')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Gain', color='r')
+    ax1.tick_params(axis='y', labelcolor='r')
+    ax2 = ax1.twinx()
+    ax2.plot(time2, phi, 'b', label='Phase Shift rad')
+    ax2.set_ylabel('Phase Shift Rad', color='b')
+    ax2.tick_params(axis='y', labelcolor='b')
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+    plt.title('Phase and Gain')
+    tile_figure(5, row=1, col=1)
+    plt.show(block=False)
+    plt.pause(0.01)
+
+    plt.figure(6)
+    plt.clf()
+    ax1 = plt.gca()
+    ax1.plot(time2, k, 'r', label='Perm')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Permeability m²', color='r')
+    ax1.tick_params(axis='y', labelcolor='r')
+    ax2 = ax1.twinx()
+    ax2.plot(time2, bc, 'b', label='Storage')
+    ax2.set_ylabel('Storage', color='b')
+    ax2.tick_params(axis='y', labelcolor='b')
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+    tile_figure(6, row=1, col=2)
+    plt.show(block=False)
+    plt.pause(0.01)
+
+    logAerr = np.abs(Aerr / A / np.log(10))
+    if first_loop:
+        nomo_ax = plot_nomo(7, no_leg='yes')
+    nomo_ax.errorbar(abs(phi), np.log10(A), xerr=phierr, yerr=logAerr,
+                     fmt='o', color='blue', zorder=5, label='_nolegend_')
+    tile_figure(7, row=1, col=1)
+    plt.figure(7).tight_layout()
+    plt.figure(7).canvas.draw_idle()
+    plt.pause(0.05)
+
+    output = pd.DataFrame({
+        'Time': time2,
+        'PoreP': Pp,
+        'UpAmp': up_amp,
+        'Gain': A,
+        'delA': Aerr,
+        'Phase': phi,
+        'delphi': phierr,
+        'Period': T,
+        'delT': T_err,
+        'eta': eta,
+        'deleta': eta_err,
+        'xi': xi,
+        'delxi': xi_err,
+        'Permeability': k,
+        'delk': k_err,
+        'Storage Capacity': bc,
+        'delbeta': bc_err
+    })
+    output.to_csv(outfile, mode='w' if first_loop else 'a', header=first_loop, index=False)
+
+    print(f"\n{'=' * 60}")
+    print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
+    if len(k):
+        print(f"Last permeability: {k[-1]:.3e} ± {k_err[-1]:.3e} m²")
+        print(f"Last storage capacity: {bc[-1]:.3e} ± {bc_err[-1]:.3e} Pa⁻¹")
+    print(f"{'=' * 60}")
+    return nomo_ax
+
+
+def main():
+    plt.close('all')
+    try:
+        plt.pause(0.3)
+    except Exception:
+        pass
+
+    print("\n" + "=" * 60)
+    print("STEP 1: Please select where to SAVE the output CSV file")
+    print("=" * 60)
+    root = create_topmost_root()
+    try:
+        outfile = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xls"), ("all files", "*.*")],
+            title="Output File",
+            initialfile="datafile_proc.csv"
+        )
+    finally:
+        root.destroy()
+
+    if not outfile:
+        print("Save operation cancelled.")
+        return
+
     print(f"\nOutput will be saved to: {outfile}")
     first_loop = True
+    nomo_ax = None
+    plt.ion()
+
     while True:
-        # Prompt for input data file
         print("\n" + "=" * 60)
         print("STEP 2: Please select an INPUT DATA file to process")
         print("=" * 60)
         root = create_topmost_root()
-        datafile = filedialog.askopenfilename(title="Select Data File")
-        root.destroy()
+        try:
+            datafile = filedialog.askopenfilename(
+                defaultextension=".dat",
+                filetypes=[("Data files", "*.dat *.mat"), ("DAT files", "*.dat"), ("MAT files", "*.mat"), ("all files", "*.*")],
+                title="Select Data File"
+            )
+        finally:
+            root.destroy()
+
         if not datafile:
             print("No file selected. Exiting loop.")
             break
-    
+
         print(f"\nLoading data from: {os.path.basename(datafile)}")
-        # Load and extract data
-        all_file = np.loadtxt(datafile, delimiter='\t', skiprows=HeaderRows)
-        # May need to add calibrations here
-        time = all_file[:, time_col]
-        pup = all_file[:, Pup_col]
-        pdwn = all_file[:, Pdwn_col]
-        pc=np.mean(all_file[:, Pc_col])
-        # NOTE: lowpass filter removed — with fs=1Hz and oscillation periods
-        # of ~20-60s, any filter aggressive enough to remove aircon noise
-        # also kills the PPO signal. No filtering applied to downstream.
-    
-        print("\nSTEP 3: Interactive plot will appear")
-        print("        Click 2 points to select COARSE region of interest")
-        # ── CHANGE v4 [4]: clear figure before recreating axes ───────────────
-        # v3 reused the same axes on repeated runs, causing axis labels from
-        # the previous run to accumulate (overlap) on the new ones.
-        # Calling .clf() before plt.subplots() ensures a clean slate each time.
-        # Stage 1: coarse ROI selection
-        _fig1 = plt.figure(1)
-        _fig1.clf()
-        fig, ax = plt.subplots(num=1)
-        ax.plot(time, pup, 'r', label='Upstream Pressure')
-        ax.plot(time, pdwn, 'b', label='Downstream Pressure')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Pressure (MPa)')
-        ax.set_title('Click start and end points for coarse ROI')
-        ax.legend()
-        ax.grid()
-        plt.show(block=False)
-        plt.pause(0.1)
-        make_figure_topmost(fig)
-    
-        # Get coarse ROI
-        pts = fig.ginput(2, timeout=-1)
-        tree = KDTree(np.column_stack((time, pup)))
-        idx = [tree.query(pt)[1] for pt in pts]
-    
-        # Stage 2: refine ROI — open a completely new figure window
-        plt.close(fig)   # close figure 1 entirely
-        
-        mask_roi = (time >= time[idx[0]]) & (time <= time[idx[1]])
-        # Clear figure 10 before recreating axes (prevents label overlap on re-runs)
-        _fig10 = plt.figure(10)
-        _fig10.clf()
-        fig2, ax2 = plt.subplots(num=10, figsize=(12, 5))
-        ax2.plot(time[mask_roi], pup[mask_roi],  'r', lw=0.9, label='Upstream Pressure')
-        ax2.plot(time[mask_roi], pdwn[mask_roi], 'b', lw=0.9, label='Downstream Pressure')
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Pressure (MPa)')
-        ax2.set_title('Click START and END points for REFINED ROI')
-        ax2.legend()
-        ax2.grid()
-        plt.tight_layout()
-        plt.show(block=False)
-        plt.pause(0.1)
-        make_figure_topmost(fig2)
-    
-        # Get refined ROI
-        pts = fig2.ginput(2, timeout=-1)
-        tree = KDTree(np.column_stack((time, pup)))
-        idx = [tree.query(pt)[1] for pt in pts]
-    
-        
-    
-        # Plot selected range
-        plt.figure(2)
-        plt.clf()
-        plt.plot(time, pup, 'r', label='Upstream Pressure')
-        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
-        plt.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
-        plt.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Pressure (MPa)')
-        plt.title('Selected Data Range')
-        plt.legend()
-        plt.show()
-    
-        # Extract selected data
-        time = time[idx[0]:idx[1] + 1]
-        time=time-np.min(time)
-        pup = pup[idx[0]:idx[1] + 1]
-        pdwn = pdwn[idx[0]:idx[1] + 1]
-    
-        # Fit and model
-        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N2boot,Tmin,Tmax)
-        plot_bootstrap_distributions(up_params_bs, dwn_params_bs, updata, dwndata, 3)
-        A = np.abs(dwndata[0] / updata[0])
-        Aerr = A * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
-        logAerr = np.abs(Aerr / A / np.log(10))
-        phi = updata[2]-dwndata[2]
-        phierr = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
-        T = updata[1]
-        if phi > np.pi:
-            phi -= 2 * np.pi
-        if phi < -np.pi:
-            phi += 2*np.pi
-        
-            
-    
-        upmodel = updata[3] + updata[0] * np.sin(time * 2 * np.pi / updata[1] + updata[2])
-        dwnmodel = dwndata[3] + updata[0]*A * np.sin(time * 2 * np.pi / updata[1] + updata[2]-phi)+dwndata[4]*time
-    
-        plt.figure(4)
-        plt.clf()
-        plt.plot(time, pup, 'r', label='Upstream Pressure')
-        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
-        plt.plot(time, upmodel, 'g', label='Up Model')
-        plt.plot(time, dwnmodel, 'm', label='Down Model')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Pressure (MPa)')
-        plt.title('Model Fit')
-        plt.legend()
-        plt.show()
-    
-        C,visc,bd,bd_err=permeant_props(permeant,Temp,updata[3],bd_mode,bd,bd_err,Dv,Dv_err)
-        
-        xi, eta, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(A, phi, w)
-        if first_loop == True:
-            nomo_ax = plot_nomo(5)   # returns main axis, store for all loops
-        # Always plot on the stored main axis (not twin ax2)
-        nomo_ax.errorbar(abs(phi), np.log10(A), xerr=phierr, yerr=logAerr,
-                         fmt='o', color='blue', zorder=5,
-                         label='_nolegend_')
-        nomo_ax.plot(phi0, np.log10(A0), '^', color='g', zorder=5,
-                     label='_nolegend_')
-        nomo_ax.plot(phifit, np.log10(Afit), 'x', color='r',
-                     markersize=8, markeredgewidth=2, zorder=5,
-                     label='_nolegend_')
-        # Refresh figure layout cleanly
-        plt.figure(5).tight_layout()
-        plt.figure(5).canvas.draw_idle()
-        plt.pause(0.05)
-    
-        
-        eta_err, xi_err = bern_errors(x_sol, A,Aerr, phi, w, eta, xi,up_params_bs,dwn_params_bs)
-    
-            
-        k    = float((eta * np.pi * l * visc * bd) / (area * T))
-        kerr = float(np.abs(k) * np.sqrt(
-            (eta_err / eta)      ** 2 +
-            (l_err   / l)        ** 2 +
-            (bd_err  / bd)       ** 2 +
-            (2 * dia_err / dia)  ** 2 +
-            (up_err[1] / T)      ** 2
-        ))
-    
-        if xi == 0:
-            bc     = 0.0
-            bc_err = np.nan
+        params = load_processing_config(datafile)
+        print_input_summary(params, datafile)
+
+        if params['proc_type'] == 'cont':
+            nomo_ax = process_continuous(datafile, outfile, params, first_loop, nomo_ax)
         else:
-            bc     = float((xi * bd) / (area * l))
-            bc_err = float(np.abs(bc) * np.sqrt(
-                (xi_err  / xi)       ** 2 +
-                (bd_err  / bd)       ** 2 +
-                (2 * dia_err / dia)  ** 2 +
-                (l_err   / l)        ** 2
-            ))
-    
-        # Create and append DataFrame
-        file=os.path.basename(datafile)
-        output = pd.DataFrame([{
-            'File': file,
-            'start index': idx[0],
-            'end index': idx[1],
-            'ConfP': pc,
-            'PoreP': updata[3],
-            'UpAmp': updata[0],
-            'Gain': A,
-            'delA': Aerr,
-            'Phase': phi,
-            'delphi': phierr,
-            'Period': T,
-            'delT': up_err[1],
-            'eta': eta,
-            'deleta': eta_err,
-            'xi': xi,
-            'delxi': xi_err,
-            'Permeability': k,
-            'delk': kerr,
-            'Storage Capacity': bc,
-            'delbeta': bc_err 
-        }])
-        file_name = os.path.basename(datafile)
-        output.to_csv(outfile, mode='w' if first_loop else 'a', header=first_loop, index=False)
-        print(f"\n{'=' * 60}")
-        print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
-        print(f"Permeability: {k:.3e} ± {kerr:.3e} m²")
-        print(f"Storage Capacity: {bc:.3e} ± {bc_err:.3e} Pa⁻¹")
-        print(f"{'=' * 60}")
+            nomo_ax = process_single_measurement(datafile, outfile, params, first_loop, nomo_ax)
+
         first_loop = False
         if not ask_to_continue():
             break
-        
-        
-elif proc_type == 'cont':
-    print(f"\nOutput will be saved to: {outfile}")
-    first_loop = True
-    while True:
-        # Prompt for input data file
-        print("\n" + "=" * 60)
-        print("STEP 2: Please select an INPUT DATA file to process")
-        print("=" * 60)
-        root = create_topmost_root()
-        datafile = filedialog.askopenfilename(title="Select Data File")
-        root.destroy()
-        if not datafile:
-            print("No file selected. Exiting loop.")
-            break
-    
-        print(f"\nLoading data from: {os.path.basename(datafile)}")
-        # Load and extract data
-        all_file = np.loadtxt(datafile, delimiter='\t', skiprows=HeaderRows)
-        # May need to add calibrations here
-        time = all_file[:, time_col]
-        pup = all_file[:, Pup_col]
-        pdwn = all_file[:, Pdwn_col]
-        pc=np.mean(all_file[:, Pc_col])
-        time_all=time
-        pup_all=pup
-        pdwn_all=pdwn
-        
-    
-        print("\nSTEP 3: Interactive plot will appear")
-        print("        Click 2 points to select COARSE region of interest")
-        # ── CHANGE v4 [4]: clear figure before recreating axes ───────────────
-        # v3 reused the same axes on repeated runs, causing axis labels from
-        # the previous run to accumulate (overlap) on the new ones.
-        # Calling .clf() before plt.subplots() ensures a clean slate each time.
-        # Stage 1: coarse ROI selection
-        _fig1 = plt.figure(1)
-        _fig1.clf()
-        fig, ax = plt.subplots(num=1)
-        ax.plot(time, pup, 'r', label='Upstream Pressure')
-        ax.plot(time, pdwn, 'b', label='Downstream Pressure')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Pressure (MPa)')
-        ax.set_title('Click start and end points for coarse ROI')
-        ax.legend()
-        ax.grid()
-        plt.show(block=False)
-        plt.pause(0.1)
-        make_figure_topmost(fig)
-    
-        # Get coarse ROI
-        pts = fig.ginput(2, timeout=-1)
-        tree = KDTree(np.column_stack((time, pup)))
-        idx = [tree.query(pt)[1] for pt in pts]
-    
-        # Stage 2: refine ROI — open a completely new figure window
-        plt.close(fig)   # close figure 1 entirely
-        
-        mask_roi = (time >= time[idx[0]]) & (time <= time[idx[1]])
-        # Clear figure 10 before recreating axes (prevents label overlap on re-runs)
-        _fig10 = plt.figure(10)
-        _fig10.clf()
-        fig2, ax2 = plt.subplots(num=10, figsize=(12, 5))
-        ax2.plot(time[mask_roi], pup[mask_roi],  'r', lw=0.9, label='Upstream Pressure')
-        ax2.plot(time[mask_roi], pdwn[mask_roi], 'b', lw=0.9, label='Downstream Pressure')
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Pressure (MPa)')
-        ax2.set_title('Click START and END points for REFINED ROI')
-        ax2.legend()
-        ax2.grid()
-        plt.tight_layout()
-        plt.show(block=False)
-        plt.pause(0.1)
-        make_figure_topmost(fig2)
-    
-        # Get refined ROI
-        pts = fig2.ginput(2, timeout=-1)
-        tree = KDTree(np.column_stack((time, pup)))
-        idx = [tree.query(pt)[1] for pt in pts]
-    
-        
-    
-        # Plot selected range
-        plt.figure(2)
-        plt.clf()
-        plt.plot(time, pup, 'r', label='Upstream Pressure')
-        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
-        plt.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
-        plt.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Pressure (MPa)')
-        plt.title('Selected Data Range')
-        plt.legend()
-        plt.show()
-    
-        # Extract selected data
-        time = time[idx[0]:idx[1] + 1]
-        time=time-np.min(time)
-        pup = pup[idx[0]:idx[1] + 1]
-        pdwn = pdwn[idx[0]:idx[1] + 1]
-        # Fit and model
-        updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup, pdwn, time, N2boot,Tmin,Tmax)
-        plot_bootstrap_distributions(up_params_bs, dwn_params_bs, updata, dwndata, 3)
-        A = np.abs(dwndata[0] / updata[0])
-        Aerr = A * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
-        logAerr = np.abs(Aerr / A / np.log(10))
-        phi = updata[2]-dwndata[2]
-        phierr = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
-        T = updata[1]
-        if phi > np.pi:
-            phi -= 2 * np.pi
-        if phi < -np.pi:
-            phi += 2*np.pi
-            
-        upmodel = updata[3] + updata[0] * np.sin(time * 2 * np.pi / updata[1] + updata[2])
-        dwnmodel = dwndata[3] + updata[0]*A * np.sin(time * 2 * np.pi / updata[1] + updata[2]-phi)+dwndata[4]*time
-        
-       
-    
-        plt.figure(4)
-        plt.clf()
-        plt.plot(time, pup, 'r', label='Upstream Pressure')
-        plt.plot(time, pdwn, 'b', label='Downstream Pressure')
-        plt.plot(time, upmodel, 'g', label='Up Model')
-        plt.plot(time, dwnmodel, 'm', label='Down Model')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Pressure (MPa)')
-        plt.title('Model Fit')
-        plt.legend()
-        plt.show()
-        plt.pause(0.01)
-        
-        
-        T_main=T
-        N=len(time_all)
-        del_t=(time_all[-1]-time_all[0])/(N-1)
-        fs=1/del_t
-        N_periods=np.floor((N*del_t)/T_main)
-        periods_2_proc=prompt("How many periods do you want to process?",5,cast=int)
-        N2proc=int(np.floor(periods_2_proc*T_main/del_t))
-        
 
-        # Initialize empty arrays
-        A = np.empty(0, dtype=float)
-        phi = np.empty(0, dtype=float)
-        Aerr = np.empty(0, dtype=float)
-        phierr = np.empty(0, dtype=float)
-        T = np.empty(0, dtype=float)
-        T_err = np.empty(0, dtype=float)
-        time2 = np.empty(0, dtype=float)
-        xi = np.empty(0, dtype=float)
-        eta = np.empty(0, dtype=float)
-        eta_err = np.empty(0, dtype=float)
-        xi_err = np.empty(0, dtype=float)
-        k = np.empty(0, dtype=float)
-        bc = np.empty(0, dtype=float)
-        k_err = np.empty(0, dtype=float)
-        bc_err = np.empty(0, dtype=float)
-        Pp = np.empty(0, dtype=float)
-        up_amp = np.empty(0, dtype=float)
+    plt.ioff()
+    plt.show()
 
-        m=0
-        n=N2proc+1
-        step=int(np.floor(T_main/del_t))
-        with tqdm(total=N, desc="Running While Loop") as pbar:
-            while n<N:
-                updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(pup_all[m:n], pdwn_all[m:n], time_all[m:n], N2boot,Tmin,Tmax)
-                Ai = np.abs(dwndata[0] / updata[0])
-                Aerri = Ai * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
-                
-                phii = updata[2]-dwndata[2]
-                phierri = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
-                Ti = updata[1]
-                if phii > np.pi:
-                    phii -= 2 * np.pi
-                if phii < -np.pi:
-                    phii += 2*np.pi
-                C,visc,bd,bd_err=permeant_props(permeant,Temp,updata[3],bd_mode,bd,bd_err,Dv,Dv_err)
-                xii, etai, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(Ai, phii, w)
-                eta_erri, xi_erri = bern_errors(x_sol, Ai,Aerr, phii, w, etai, xii,up_params_bs,dwn_params_bs)
-            
-                  
-                ki    = float((etai * np.pi * l * visc * bd) / (area * Ti))
-                k_erri = float(np.abs(ki) * np.sqrt(
-                    (eta_erri / etai)      ** 2 +
-                    (l_err   / l)        ** 2 +
-                    (bd_err  / bd)       ** 2 +
-                    (2 * dia_err / dia)  ** 2 +
-                    (up_err[1] / Ti)      ** 2
-                ))
-            
-                if xii == 0:
-                    bci     = 0.0
-                    bc_erri = np.nan
-                else:
-                    bci    = float((xii * bd) / (area * l))
-                    bc_erri = float(np.abs(bci) * np.sqrt(
-                        (xi_erri  / xii)       ** 2 +
-                        (bd_err  / bd)       ** 2 +
-                        (2 * dia_err / dia)  ** 2 +
-                        (l_err   / l)        ** 2
-                    ))
-                
-                
-                # --- INSIDE YOUR LOOP ---
-                A = np.append(A, Ai)
-                phi = np.append(phi, phii)
-                Aerr = np.append(Aerr, Aerri)
-                phierr = np.append(phierr, phierri)
-                T = np.append(T, Ti)
-                T_err = np.append(T_err, up_err[1])
-                time2 = np.append(time2, (time_all[n] + time_all[m]) / 2)
-                xi = np.append(xi, xii)
-                eta = np.append(eta, etai)
-                eta_err = np.append(eta_err, eta_erri)
-                xi_err = np.append(xi_err, xi_erri)
-                k = np.append(k, ki)
-                bc = np.append(bc, bci)
-                k_err = np.append(k_err, k_erri)
-                bc_err = np.append(bc_err, bc_erri)
-                Pp = np.append(Pp, updata[3])
-                up_amp = np.append(up_amp, updata[0])
 
-                
-                m+=step
-                n+=step
-                pbar.update(step)
-        
-        
-        plt.figure(5)
-        plt.clf()
-        ax1=plt.gca()
-        
-        # 2. Plot your first dataset
-        ax1.plot(time2, A, 'r', label='Gain')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Gain', color='r')  # Good practice to color-code labels
-        ax1.tick_params(axis='y', labelcolor='r')
-        
-        # 3. Create the twin axis
-        ax2 = ax1.twinx()
-        ax2.plot(time2, phi, 'b', label='Phase Shift rad')
-        ax2.set_ylabel('Phase Shift Rad', color='b')
-        ax2.tick_params(axis='y', labelcolor='b')
-        
-        # 4. Handle the combined legend (by default, they overwrite each other)
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-        
-        plt.title('Phase and Gain')
-        plt.show()
-        plt.pause(0.01)
-        
-        plt.figure(6)
-        plt.clf()
-        ax1=plt.gca()
-        
-        # 2. Plot your first dataset
-        ax1.plot(time2, k, 'r', label='Perm')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Permeability m^2', color='r')  # Good practice to color-code labels
-        ax1.tick_params(axis='y', labelcolor='r')
-        
-        # 3. Create the twin axis
-        ax2 = ax1.twinx()
-        ax2.plot(time2, bc, 'b', label='Storage')
-        ax2.set_ylabel('Storage', color='b')
-        ax2.tick_params(axis='y', labelcolor='b')
-        
-        # 4. Handle the combined legend (by default, they overwrite each other)
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-        
-        plt.show()
-        plt.pause(0.01)
-        
-        logAerr=np.abs(Aerr / A / np.log(10))
-        if first_loop == True:
-            nomo_ax = plot_nomo(7,no_leg='yes')   # returns main axis, store for all loops
-        # Always plot on the stored main axis (not twin ax2)
-        nomo_ax.errorbar(abs(phi), np.log10(A), xerr=phierr, yerr=logAerr,
-                         fmt='o', color='blue', zorder=5,
-                         label='_nolegend_')
-        
-        # Refresh figure layout cleanly
-        plt.figure(5).tight_layout()
-        plt.figure(5).canvas.draw_idle()
-        plt.pause(0.05)
-        
-        # Create and append DataFrame
-        file=os.path.basename(datafile)
-        output = pd.DataFrame({
-            'Time': time2,
-            'PoreP': Pp,
-            'UpAmp': up_amp,
-            'Gain': A,
-            'delA': Aerr,
-            'Phase': phi,
-            'delphi': phierr,
-            'Period': T,
-            'delT': T_err,
-            'eta': eta,
-            'deleta': eta_err,
-            'xi': xi,
-            'delxi': xi_err,
-            'Permeability': k,
-            'delk': k_err,
-            'Storage Capacity': bc,
-            'delbeta': bc_err 
-        })
-        file_name = os.path.basename(datafile)
-        output.to_csv(outfile, mode='w' if first_loop else 'a', header=first_loop, index=False)
-        print(f"\n{'=' * 60}")
-        print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
-        print(f"Permeability: {k[-1]:.3e} ± {k_err[-1]:.3e} m²")
-        print(f"Storage Capacity: {bc[-1]:.3e} ± {bc_err[-1]:.3e} Pa⁻¹")
-        print(f"{'=' * 60}")
-        
-        
-        first_loop = False
-        #if not ask_to_continue():
-        break
-plt.ioff()
-plt.show()
+if __name__ == "__main__":
+    main()
