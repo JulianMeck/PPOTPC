@@ -154,7 +154,7 @@ proc_type = cont
 periods_2_proc = 5
 ```
 
-During continuous processing, individual windows can be skipped if the sine fit does not converge or if the fitted gain is outside the physical Bernabé domain (`0 < A < 1`). The run continues and reports how many windows were skipped. The continuous permeability/storage plot uses base-10 logarithmic y-axes; non-positive values are retained in the CSV but masked in that plot.
+During continuous processing, individual windows can be skipped if the sine fit does not converge or if the fitted gain is outside the physical Bernabé domain (`0 < A < 1`). The run continues and reports how many windows were skipped. The continuous permeability/storage plot uses base-10 logarithmic y-axes and shaded `± error` bands when positive values are available; if a series is entirely non-positive, that axis falls back to linear scale with a note on the plot. Non-positive values are retained in the CSV.
 
 By default, both `sin` and `cont` processing use the fixed sample length `l` from `[Sample]`:
 
@@ -198,6 +198,34 @@ thickness_max_mm = 5
 ```
 
 The output CSV includes `Thickness_mm` and `ThicknessStd_mm`: for `sin` they refer to the selected ROI, and for `cont` they refer to each processed moving window. Existing configs that omit `thickness_mode` keep the old behavior (`fixed`).
+
+When the Bernabé solution lies on the `xi = 0` boundary, `Storage Capacity` is written as `0`, while `delbeta` is written as `NaN` because the uncertainty of a boundary-pinned storage term is not defined.
+
+### Replotting continuous CSV results
+
+Continuous permeability/storage results can be replotted from an existing output CSV without rerunning the full processing workflow:
+
+```bash
+python plot_continuous_results.py data/s2077RED.csv
+```
+
+If no CSV path is provided, the script opens a file picker. To save a figure without opening a plot window:
+
+```bash
+python plot_continuous_results.py data/s2077RED.csv --save s2077RED_perm_storage.png --no-show
+```
+
+Measured gain/phase values can also be replotted on a Bernabé nomogram from an existing CSV:
+
+```bash
+python plot_nomogram_results.py data/s2077RED.csv
+```
+
+For a non-interactive save:
+
+```bash
+python plot_nomogram_results.py data/s2077RED.csv --save s2077RED_nomogram.png --no-show
+```
 
 ## LSSA Method
 The script uses a least-squares spectral analysis (LSSA) technique to fit the sine wave oscilations of the upstream and downstream waves. The is preferred to FFT method as you do not need to have a whole number of waveforms, the data do not have to be evenly sampled and the method can reliably fit a single waveform although results are best with ~5-10 waves. First the frequency (or period) of the inputted upstream oscilations is calculated by evaluating the Lomb-Scargle periodogram that outputs the power-spectrum density using the ```LombScargle``` function from the ```Astropy``` project. Then the upstream amplitiude $A_{\mathrm{up}}$, downstream amplitude $A_{\mathrm{dwn}}$, upstream phase $\phi_{\mathrm{up}}$, downstream phase $\phi_{\mathrm{dwn}}$, upstream offset $C_{\mathrm{up}}$ and downstream offset $C_{\mathrm{dwn}}$ are claculated using a linear regression where you solve $\alpha$, $\beta$ and $\gamma$ in the following equation:

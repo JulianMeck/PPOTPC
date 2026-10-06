@@ -1507,6 +1507,33 @@ def validate_thickness_range(params, thickness, start, stop, context="selected R
     )
 
 
+def positive_error_band(values, errors):
+    """Return lower/upper arrays for log-scale error shading."""
+    values = np.asarray(values, dtype=float)
+    errors = np.asarray(errors, dtype=float)
+    lower = values - errors
+    upper = values + errors
+    valid = (
+        np.isfinite(values) & np.isfinite(errors) &
+        np.isfinite(lower) & np.isfinite(upper) &
+        (values > 0) & (errors >= 0) & (lower > 0) & (upper > 0)
+    )
+    return np.where(valid, lower, np.nan), np.where(valid, upper, np.nan)
+
+
+def has_positive_values(values):
+    """Return True if an array has at least one finite positive value."""
+    values = np.asarray(values, dtype=float)
+    return bool(np.any(np.isfinite(values) & (values > 0)))
+
+
+def format_value_error(value, error, unit):
+    """Format a value ± error pair, handling undefined/NaN uncertainties."""
+    if np.isfinite(error):
+        return f"{value:.3e} ± {error:.3e} {unit}"
+    return f"{value:.3e} {unit} (uncertainty undefined)"
+
+
 def select_roi(time, pup, pdwn):
     """Interactively select and refine a region of interest."""
     print("\nSTEP 3: Interactive plot will appear")
@@ -1732,8 +1759,8 @@ def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
     print(f"\n{'=' * 60}")
     print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
     print(f"Thickness used: {l * 1000:.3f} mm")
-    print(f"Permeability: {bern['k']:.3e} ± {bern['kerr']:.3e} m²")
-    print(f"Storage Capacity: {bern['bc']:.3e} ± {bern['bc_err']:.3e} Pa⁻¹")
+    print(f"Permeability: {format_value_error(bern['k'], bern['kerr'], 'm²')}")
+    print(f"Storage Capacity: {format_value_error(bern['bc'], bern['bc_err'], 'Pa⁻¹')}")
     print(f"{'=' * 60}")
     return nomo_ax
 
@@ -1881,19 +1908,32 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     ax1 = plt.gca()
     k_plot = np.where(np.isfinite(k) & (k > 0), k, np.nan)
     bc_plot = np.where(np.isfinite(bc) & (bc > 0), bc, np.nan)
+    k_low, k_high = positive_error_band(k, k_err)
+    bc_low, bc_high = positive_error_band(bc, bc_err)
     ax1.plot(time2, k_plot, 'r', label='Perm')
-    ax1.set_yscale('log', base=10)
+    ax1.fill_between(time2, k_low, k_high, color='r', alpha=0.18, linewidth=0, label='Perm ± err')
     ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Permeability m² (log10)', color='r')
+    if has_positive_values(k_plot):
+        ax1.set_yscale('log', base=10)
+        ax1.set_ylabel('Permeability m² (log10)', color='r')
+    else:
+        ax1.plot(time2, k, 'r', alpha=0.35, label='Perm (non-positive)')
+        ax1.set_ylabel('Permeability m²', color='r')
+        ax1.text(0.02, 0.95, 'No positive permeability values for log10 scale',
+                 transform=ax1.transAxes, color='r', va='top', fontsize=9)
     ax1.tick_params(axis='y', labelcolor='r')
     ax2 = ax1.twinx()
     ax2.plot(time2, bc_plot, 'b', label='Storage')
-    ax2.set_yscale('log', base=10)
-    ax2.set_ylabel('Storage Pa⁻¹ (log10)', color='b')
+    ax2.fill_between(time2, bc_low, bc_high, color='b', alpha=0.15, linewidth=0, label='Storage ± err')
+    if has_positive_values(bc_plot):
+        ax2.set_yscale('log', base=10)
+        ax2.set_ylabel('Storage Pa⁻¹ (log10)', color='b')
+    else:
+        ax2.plot(time2, bc, 'b', alpha=0.35, label='Storage (non-positive)')
+        ax2.set_ylabel('Storage Pa⁻¹', color='b')
+        ax2.text(0.98, 0.95, 'No positive storage values for log10 scale',
+                 transform=ax2.transAxes, color='b', va='top', ha='right', fontsize=9)
     ax2.tick_params(axis='y', labelcolor='b')
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
     tile_figure(6, row=1, col=2)
     plt.show(block=False)
     plt.pause(0.01)
@@ -1934,8 +1974,10 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     print(f"\n{'=' * 60}")
     print(f"Results {'saved' if first_loop else 'appended'} to {os.path.basename(outfile)}")
     if len(k):
-        print(f"Last permeability: {k[-1]:.3e} ± {k_err[-1]:.3e} m²")
-        print(f"Last storage capacity: {bc[-1]:.3e} ± {bc_err[-1]:.3e} Pa⁻¹")
+        print(f"Last permeability: {format_value_error(k[-1], k_err[-1], 'm²')}")
+        print(f"Last storage capacity: {format_value_error(bc[-1], bc_err[-1], 'Pa⁻¹')}")
+        if np.all(np.isfinite(bc)) and np.all(bc == 0) and np.all(~np.isfinite(bc_err)):
+            print("Storage remained on the xi=0 boundary; delbeta is undefined and stored as NaN in the CSV.")
     print(f"{'=' * 60}")
     return nomo_ax
 
