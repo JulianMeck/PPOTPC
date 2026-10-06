@@ -26,6 +26,8 @@ The code requires time series data of upstream and downstream pore pressure. The
 # sample length in mm
 l = 12.68
 l_err = 0.01e-3
+# sample thickness mode: fixed uses l; mean is optional for continuous processing
+thickness_mode = fixed
 # sample diameter in mm
 dia = 18.83
 dia_err = 0.01
@@ -144,13 +146,58 @@ proc_type = sin
 
 Use `proc_type = sin` for the standard workflow where one region of interest is selected and one permeability result is appended to the output CSV.
 
-Use `proc_type = cont` for continuous/cycling pore-pressure experiments where permeability is calculated through time using a moving window. The wave period should be approximately constant over the whole dataset. The selected region of interest is used to estimate the initial wave parameters, then the script processes windows of `periods_2_proc` periods and steps forward by one period:
+Use `proc_type = cont` for continuous/cycling pore-pressure experiments where permeability is calculated through time using a moving window. The wave period should be approximately constant over the selected data. The selected region of interest is used to estimate the initial wave parameters, then the script processes only that selected ROI with windows of `periods_2_proc` periods and steps forward by one period:
 
 ```ini
 [Processing]
 proc_type = cont
 periods_2_proc = 5
 ```
+
+During continuous processing, individual windows can be skipped if the sine fit does not converge or if the fitted gain is outside the physical Bernabé domain (`0 < A < 1`). The run continues and reports how many windows were skipped. The continuous permeability/storage plot uses base-10 logarithmic y-axes; non-positive values are retained in the CSV but masked in that plot.
+
+By default, both `sin` and `cont` processing use the fixed sample length `l` from `[Sample]`:
+
+```ini
+[Sample]
+l = 12.68
+thickness_mode = fixed
+```
+
+Optionally, the script can use the mean sample thickness from the data file. Set `thickness_mode = mean` and provide either a `.dat` column or a `.mat` variable. Thickness values are converted to mm using `thickness_scale` before the mean is calculated. Before fitting, the selected ROI is checked for valid thickness values; by default values must satisfy `0 < thickness <= 5` mm.
+
+- with `proc_type = sin`, the mean is calculated inside the selected ROI;
+- with `proc_type = cont`, the mean is calculated inside each moving window.
+
+```ini
+[Sample]
+thickness_mode = mean
+
+[File]
+# for mode = dat
+thickness_col = 4
+# raw thickness value x thickness_scale = mm
+thickness_scale = 1
+thickness_min_mm = 0
+thickness_max_mm = 5
+```
+
+For direct MATLAB input:
+
+```ini
+[Sample]
+thickness_mode = mean
+
+[File]
+# for mode = mat
+thickness_var = Thickness
+# raw thickness value x thickness_scale = mm
+thickness_scale = 1
+thickness_min_mm = 0
+thickness_max_mm = 5
+```
+
+The output CSV includes `Thickness_mm` and `ThicknessStd_mm`: for `sin` they refer to the selected ROI, and for `cont` they refer to each processed moving window. Existing configs that omit `thickness_mode` keep the old behavior (`fixed`).
 
 ## LSSA Method
 The script uses a least-squares spectral analysis (LSSA) technique to fit the sine wave oscilations of the upstream and downstream waves. The is preferred to FFT method as you do not need to have a whole number of waveforms, the data do not have to be evenly sampled and the method can reliably fit a single waveform although results are best with ~5-10 waves. First the frequency (or period) of the inputted upstream oscilations is calculated by evaluating the Lomb-Scargle periodogram that outputs the power-spectrum density using the ```LombScargle``` function from the ```Astropy``` project. Then the upstream amplitiude $A_{\mathrm{up}}$, downstream amplitude $A_{\mathrm{dwn}}$, upstream phase $\phi_{\mathrm{up}}$, downstream phase $\phi_{\mathrm{dwn}}$, upstream offset $C_{\mathrm{up}}$ and downstream offset $C_{\mathrm{dwn}}$ are claculated using a linear regression where you solve $\alpha$, $\beta$ and $\gamma$ in the following equation:
@@ -196,9 +243,11 @@ To estimate the errors in the fitted parameters we use a bootstrapping technique
 From the amplitude gain $A$ and the phase shift $\phi$ the dimensionles permeabilty $\eta$ and the dimensionless storativity $\xi$ are calculated by iteratively solving equation above. The inital values $\eta_0$ and $\xi_0$ are estimated by linearly interpolating from values in a lookup table.  We use the ```minimize``` function in the ```scipy.optimize``` functions to iteratively solve for the values of $\eta$ and $\xi$. Errors in $\eta$ and $\xi$ are estimated by using the distributions of $A$ and $\phi$ from the boot strapping.
 
 ## Output
-The script saves a csv text file with the following columns:
-|File|start index|end index|ConfP|PoreP|UpAmp|Gain|delA|Phase|delphi|Period|delT|eta|deleta|xi|delxi|Permeability|delk|Storage Capacity|delbeta|
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+The script saves a csv text file with the following columns for single-interval (`sin`) processing:
+|File|start index|end index|ConfP|Thickness_mm|ThicknessStd_mm|PoreP|UpAmp|Gain|delA|Phase|delphi|Period|delT|eta|deleta|xi|delxi|Permeability|delk|Storage Capacity|delbeta|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+Continuous (`cont`) processing saves the same fitted/calculated quantities as a time series, with `Time`, `Thickness_mm`, and `ThicknessStd_mm` for each moving window.
 
 ## Implementation
 To use this script you need the following packages installed in python:
