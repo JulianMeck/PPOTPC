@@ -124,6 +124,8 @@ import numdifftools as nd
 #import time as time_py
 from tqdm import tqdm
 
+XI_NUMERICAL_FLOOR = 1e-4
+
 # Force-close any figures left over from a previous run in the same session,
 # then give the event loop a moment to fully release tkinter resources before
 # we open new dialogs.  Without this pause the filedialog can hang on re-runs.
@@ -548,7 +550,7 @@ def bern_fwd(eta, xi):
 
 
 
-def solve_bern_eq(A, phi, w):
+def solve_bern_eq(A, phi, w, debug=False):
     """
     Solve the Bernabe equation to find eta and xi.
 
@@ -595,36 +597,46 @@ def solve_bern_eq(A, phi, w):
         (np.log10(A), phi),
         method='linear'
     )
-    # print(f"eta0:  {eta0}")
-    # print(f"xi0:  {xi0}")
+    xi0_raw = np.nan if xi0 is None else float(np.asarray(xi0).squeeze())
+    eta0_raw = np.nan if eta0 is None else float(np.asarray(eta0).squeeze())
+    xi0_near_zero = (not np.isfinite(xi0_raw)) or (xi0_raw < XI_NUMERICAL_FLOOR)
 
-    # Use approximate formula for eta when xi is negligible (MATLAB xi0<0.1)
-    if xi0 is None or np.isnan(xi0) or xi0 < 0.01:
+    # Use approximate formula for eta when xi is numerically at the xi=0 boundary.
+    if xi0_near_zero:
+        eta0 = (2 * A) / np.sqrt(1 - A ** 2)
+    else:
+        eta0 = eta0_raw
+
+    # Guard against NaN/None from griddata (outside convex hull).
+    if not np.isfinite(float(np.asarray(eta0).squeeze())):
         eta0 = (2 * A) / np.sqrt(1 - A ** 2)
 
-    # Guard against NaN/None from griddata (outside convex hull)
-    if eta0 is None or np.isnan(eta0):
-        eta0 = (2 * A) / np.sqrt(1 - A ** 2)
-    if xi0 is None or np.isnan(xi0):
-        xi0 = 0
-    
-    #print(f"eta0:  {eta0}")
-    #print(f"xi0:  {xi0}")
-    # Forward model at interpolated starting point
-    # MATLAB: if xi0 < 0.1 use analytical approximation (avoids division by zero)
-    if xi0 is None or np.isnan(xi0) or xi0 < 0.01:
+    # Keep the numerical starting value strictly positive to avoid log10(0).
+    xi0 = max(xi0_raw, XI_NUMERICAL_FLOOR) if np.isfinite(xi0_raw) else XI_NUMERICAL_FLOOR
+
+    # Forward model at interpolated starting point.
+    if xi0_near_zero:
         # Analytical solution for xi=0 (Bernabe 2006)
         A0   = eta0 / np.sqrt(eta0**2+4)
         phi0 = np.arctan(np.sqrt(1-A0**2)/A0)
-        # print(" Used Approximation to where xi ~ 0")
     else:
         A0, phi0 = bern_fwd(float(eta0), float(xi0))
-        # print(" Used full calculation to get A0 and phi0")
 
     # ── Boundary check: is phi inside the solution space? ──────────────────
     # phi_xi0 = phase at xi→0 (lower bound of solution space)
     # MATLAB: phi_xi0 = -atan(sqrt(-(A-1)*(A+1))/A) then negated
     phi_xi0 = np.arctan(np.sqrt((1 - A ** 2)) / A)   # positive value, 0…π/2
+    margin = phi - phi_xi0
+
+    if debug:
+        eta0_dbg = float(np.asarray(eta0).squeeze()) if np.size(eta0) else np.nan
+        print(
+            "[xi_debug] "
+            f"A={A:.6g}, phi={phi:.6g}, phi_xi0={phi_xi0:.6g}, "
+            f"margin={margin:.6g}, eta0={eta0_dbg:.6g}, "
+            f"xi0_raw={xi0_raw:.6g}, xi0_start={xi0:.6g}, "
+            f"xi_floor={XI_NUMERICAL_FLOOR:.1e}"
+        )
 
     if phi < phi_xi0:
         # Data lies to the left of the solution space → xi = 0 branch
@@ -633,7 +645,12 @@ def solve_bern_eq(A, phi, w):
         Afit   = A
         phifit = phi_xi0
         # x_sol: keep log_eta at solution; pin log_xi to boundary value
-        x_sol  = np.array([np.log10(eta), np.log10(1e-4)])
+        x_sol  = np.array([np.log10(eta), np.log10(XI_NUMERICAL_FLOOR)])
+        if debug:
+            print(
+                "[xi_debug] branch=boundary_phi_below_xi0, "
+                f"xi=0, eta={eta:.6g}, Afit={Afit:.6g}, phifit={phifit:.6g}"
+            )
     else:
         # ── Solve using Levenberg-Marquardt (matches MATLAB fsolve LM) ──────
         x0 = [np.log10(float(eta0)), np.log10(float(xi0))]
@@ -653,17 +670,25 @@ def solve_bern_eq(A, phi, w):
         except Exception:
             result = minimize(bern_eq, x0, args=(A, phi, w),
                               method='L-BFGS-B',
-                              bounds=[(-2, 6), (-2, 4)],
+                              bounds=[(-2, 6), (np.log10(XI_NUMERICAL_FLOOR), 4)],
                               options={'ftol': 1e-12, 'gtol': 1e-12})
             x_sol = result.x
 
         eta  = 10 ** x_sol[0]
         xi   = 10 ** x_sol[1]
+        xi_before_cutoff = xi
         Afit, phifit = bern_fwd(eta, xi)
 
-        # Mirror MATLAB: if xi is negligible treat as zero
-        if xi < 0.1:
+        # Treat only values below the numerical floor as zero.
+        if xi < XI_NUMERICAL_FLOOR:
             xi = 0
+        if debug:
+            print(
+                "[xi_debug] branch=solve, "
+                f"xi_before_cutoff={xi_before_cutoff:.6g}, xi_after_cutoff={xi:.6g}, "
+                f"cutoff_applied={xi_before_cutoff < XI_NUMERICAL_FLOOR}, eta={eta:.6g}, "
+                f"Afit={Afit:.6g}, phifit={phifit:.6g}"
+            )
 
     return xi, eta, Afit, phifit, A0, phi0, x_sol
 
@@ -1182,6 +1207,15 @@ def prompt_processing_parameters():
     params['w']    = prompt("A/phi weighting factor (0=A only, 1=phi only, 0.5=equal)", 0.5)
     params['Tmin'] = prompt("Minimum oscillation period to search (s)", 100,    cast=float)
     params['Tmax'] = prompt("Maximum oscillation period to search (s)", 10000,  cast=float)
+    params['xi_debug'] = truthy_text(prompt("Print xi debug diagnostics [true/false]", "false", cast=str))
+    params['debug_bestfit'] = truthy_text(prompt("Show moving-window best-fit debug plot [true/false]", "false", cast=str))
+    params['debug_bestfit_every'] = 1
+    params['debug_bestfit_pause'] = 0.05
+    if params['debug_bestfit']:
+        params['debug_bestfit_every'] = prompt("Plot every N accepted continuous windows", 1, cast=int)
+        params['debug_bestfit_pause'] = prompt("Pause after each debug plot in seconds (finite value recommended)", 0.05, cast=float)
+        if params['debug_bestfit_every'] < 1:
+            raise ValueError("debug_bestfit_every must be >= 1.")
 
     valid_proc_type = ('sin', 'cont')
     while True:
@@ -1252,7 +1286,13 @@ def load_processing_config(datafile):
         'w':          _config_get(config, 'Fitting',    'w',          float, required=True),
         'Tmin':       _config_get(config, 'Fitting',    'Tmin',       float, required=True),
         'Tmax':       _config_get(config, 'Fitting',    'Tmax',       float, required=True),
+        'xi_debug':   _config_get(config, ('Fitting', 'Processing', 'Debug'), 'xi_debug', bool, default=False),
+        'debug_bestfit': _config_get(config, ('Fitting', 'Processing', 'Debug'), 'debug_bestfit', bool, default=False),
+        'debug_bestfit_every': _config_get(config, ('Fitting', 'Processing', 'Debug'), 'debug_bestfit_every', int, default=1),
+        'debug_bestfit_pause': _config_get(config, ('Fitting', 'Processing', 'Debug'), 'debug_bestfit_pause', float, default=0.05),
     }
+    if params['debug_bestfit_every'] < 1:
+        raise ValueError("debug_bestfit_every must be >= 1.")
 
     proc_type = _config_get(config, ('Processing', 'Fitting'), 'proc_type', str, default=None)
     if proc_type is None:
@@ -1387,6 +1427,14 @@ def print_input_summary(params, datafile):
             f"Pdwn={params['Pdwn_var']}  Pc={params['Pc_var']}"
         )
     print(f"  Fitting:     N={params['N']}  w={params['w']}  Tmin={params['Tmin']} s  Tmax={params['Tmax']} s")
+    if params.get('xi_debug'):
+        print("  Debug:       xi_debug enabled")
+    if params.get('debug_bestfit'):
+        print(
+            "  Debug:       debug_bestfit enabled "
+            f"(every {params.get('debug_bestfit_every', 1)} accepted window, "
+            f"pause={params.get('debug_bestfit_pause', 0.05)} s)"
+        )
     if params['proc_type'] == 'cont' and params.get('periods_2_proc') is not None:
         print(f"  Continuous:  periods per window = {params['periods_2_proc']}")
     print("=" * 60)
@@ -1534,7 +1582,106 @@ def format_value_error(value, error, unit):
     return f"{value:.3e} {unit} (uncertainty undefined)"
 
 
-def select_roi(time, pup, pdwn):
+def truthy_text(value):
+    """Parse common yes/no text values into bool."""
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def fitted_pressure_models(time_values, updata, dwndata):
+    """Return fitted upstream/downstream models for one fitted window."""
+    time_values = np.asarray(time_values, dtype=float)
+    t_rel = time_values - np.nanmin(time_values)
+    upmodel = updata[0] * np.sin(2 * np.pi * t_rel / updata[1] + updata[2]) + updata[3]
+    dwnmodel = (
+        dwndata[0] * np.sin(2 * np.pi * t_rel / dwndata[1] + dwndata[2])
+        + dwndata[3]
+        + dwndata[4] * t_rel
+    )
+    return t_rel, upmodel, dwnmodel
+
+
+def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, bern,
+                       A, Aerr, phi, phierr, window_number, global_start,
+                       global_stop, thickness_mm, thickness_std_mm, pause_s,
+                       save_path=None):
+    """Plot measured data and best-fit curves for one continuous window.
+
+    Returns False when Figure 8 has been closed, so continuous processing can
+    leave debug_bestfit mode and continue without reopening the figure.
+    """
+    time_window = np.asarray(time_window, dtype=float)
+    pup_window = np.asarray(pup_window, dtype=float)
+    pdwn_window = np.asarray(pdwn_window, dtype=float)
+    t_rel, upmodel, dwnmodel = fitted_pressure_models(time_window, updata, dwndata)
+    dwn_trend = dwndata[3] + dwndata[4] * t_rel
+    phi_xi0 = np.arccos(A) if np.isfinite(A) and 0 < A < 1 else np.nan
+    margin = phi - phi_xi0 if np.isfinite(phi_xi0) else np.nan
+
+    fig_exists = plt.fignum_exists(8)
+    if fig_exists:
+        fig = plt.figure(8)
+        fig.clf()
+    else:
+        fig = plt.figure(8, figsize=(12, 8))
+    ax_up, ax_dwn = fig.subplots(2, 1, sharex=True)
+
+    ax_up.plot(time_window, pup_window, 'ko', markersize=3, alpha=0.65, label='Upstream measured')
+    ax_up.plot(time_window, upmodel, color='red', linestyle='-', lw=1.8, label='Upstream best fit')
+    ax_up.set_ylabel('Upstream pressure (MPa)')
+    ax_up.grid(True, linestyle='--', alpha=0.35)
+    ax_up.legend(loc='upper right')
+    ax_up.set_title(
+        f"Debug best fit — window {window_number} "
+        f"(indices {global_start}:{global_stop - 1})"
+    )
+
+    info_lines = [
+        f"A = {A:.5g} ± {Aerr:.2g}",
+        f"phi = {phi:.5g} ± {phierr:.2g} rad",
+        f"phi - arccos(A) = {margin:.5g} rad",
+        f"T = {updata[1]:.5g} s",
+        f"eta = {bern['eta']:.5g}",
+        f"xi = {bern['xi']:.5g}",
+        f"k = {bern['k']:.3e} m²",
+        f"Storage = {bern['bc']:.3e} Pa⁻¹",
+        f"thickness = {thickness_mm:.3f} ± {thickness_std_mm:.3f} mm",
+    ]
+    ax_up.text(
+        0.01, 0.98, "\n".join(info_lines), transform=ax_up.transAxes,
+        va='top', ha='left', fontsize=9,
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.78, edgecolor='0.7')
+    )
+
+    ax_dwn.plot(time_window, pdwn_window, 'ko', markersize=3, alpha=0.65, label='Downstream measured')
+    ax_dwn.plot(time_window, dwnmodel, color='blue', linestyle='-', lw=1.8, label='Downstream best fit')
+    ax_dwn.plot(
+        time_window, dwn_trend, color='cyan', linestyle='-', lw=1.8,
+        label='Downstream offset + linear trend'
+    )
+    ax_dwn.set_xlabel('Time (s)')
+    ax_dwn.set_ylabel('Downstream pressure (MPa)')
+    ax_dwn.grid(True, linestyle='--', alpha=0.35)
+    ax_dwn.legend(loc='upper right')
+
+    fig.tight_layout()
+    if not fig_exists:
+        tile_figure(8, row=0, col=2, row_span=2)
+        make_figure_topmost(fig)
+    plt.show(block=False)
+    fig.canvas.draw_idle()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+
+    # Do not use an indefinite GUI wait here: with TkAgg, closing Figure 8
+    # while inside waitforbuttonpress()/event-loop waits can leave the process
+    # stuck. Use a finite pause only; closing Figure 8 is detected by the caller
+    # on this or the next window and disables debug_bestfit.
+    plt.pause(max(pause_s, 0.05))
+
+    return plt.fignum_exists(8)
+
+
+def select_roi(time, pup, pdwn, params=None, thickness=None):
     """Interactively select and refine a region of interest."""
     print("\nSTEP 3: Interactive plot will appear")
     print("        Click 2 points to select COARSE region of interest")
@@ -1583,14 +1730,30 @@ def select_roi(time, pup, pdwn):
 
     fig_selected = plt.figure(2)
     fig_selected.clf()
-    plt.plot(time, pup, 'r', label='Upstream Pressure')
-    plt.plot(time, pdwn, 'b', label='Downstream Pressure')
-    plt.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
-    plt.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
-    plt.xlabel('Time (s)')
-    plt.ylabel('Pressure (MPa)')
-    plt.title('Selected Data Range')
-    plt.legend()
+    ax_selected = fig_selected.add_subplot(111)
+    ax_selected.plot(time, pup, 'r', label='Upstream Pressure')
+    ax_selected.plot(time, pdwn, 'b', label='Downstream Pressure')
+    ax_selected.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
+    ax_selected.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
+    ax_selected.set_xlabel('Time (s)')
+    ax_selected.set_ylabel('Pressure (MPa)')
+    ax_selected.set_title('Selected Data Range')
+    ax_selected.legend(loc='upper left')
+    ax_selected.grid(True, linestyle='--', alpha=0.35)
+
+    if params is not None and params.get('thickness_mode') == 'mean' and thickness is not None:
+        thickness_values = np.asarray(thickness, dtype=float)
+        if len(thickness_values) == len(time):
+            valid_thickness = np.isfinite(thickness_values)
+            if np.any(valid_thickness):
+                ax_thickness = ax_selected.twinx()
+                ax_thickness.plot(
+                    time[valid_thickness], thickness_values[valid_thickness],
+                    color='tab:green', lw=0.9, alpha=0.8,
+                )
+                ax_thickness.set_ylabel('Thickness (mm)', color='tab:green')
+                ax_thickness.tick_params(axis='y', labelcolor='tab:green')
+                ax_thickness.spines['right'].set_color('tab:green')
     tile_figure(2, row=0, col=1)
     make_figure_topmost(fig_selected)
     plt.show(block=False)
@@ -1621,8 +1784,7 @@ def fit_selected_window(time, pup, pdwn, idx, params):
     if phi < -np.pi:
         phi += 2 * np.pi
 
-    upmodel = updata[3] + updata[0] * np.sin(time_sel * 2 * np.pi / updata[1] + updata[2])
-    dwnmodel = dwndata[3] + updata[0] * A * np.sin(time_sel * 2 * np.pi / updata[1] + updata[2] - phi) + dwndata[4] * time_sel
+    _, upmodel, dwnmodel = fitted_pressure_models(time_sel, updata, dwndata)
 
     fig_model = plt.figure(4)
     fig_model.clf()
@@ -1671,7 +1833,7 @@ def compute_bernabe_outputs(A, Aerr, phi, up_params_bs, dwn_params_bs, params, l
         params['permeant'], params['Temp'], up_pressure,
         params['bd_mode'], params['bd'], params['bd_err'], params['Dv'], params['Dv_err']
     )
-    xi, eta, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(A, phi, params['w'])
+    xi, eta, Afit, phifit, A0, phi0, x_sol = solve_bern_eq(A, phi, params['w'], debug=params.get('xi_debug', False))
     eta_err, xi_err = bern_errors(x_sol, A, Aerr, phi, params['w'], eta, xi, up_params_bs, dwn_params_bs)
 
     k = float((eta * np.pi * l * visc * bd) / (area * T))
@@ -1706,7 +1868,7 @@ def compute_bernabe_outputs(A, Aerr, phi, up_params_bs, dwn_params_bs, params, l
 
 def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
     time, pup, pdwn, pc, thickness = load_experiment_data(datafile, params)
-    idx = select_roi(time, pup, pdwn)
+    idx = select_roi(time, pup, pdwn, params=params, thickness=thickness)
     validate_thickness_range(params, thickness, idx[0], idx[1] + 1, context="selected ROI")
     fit = fit_selected_window(time, pup, pdwn, idx, params)
 
@@ -1767,7 +1929,7 @@ def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
 
 def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     time_all, pup_all, pdwn_all, pc, thickness_all = load_experiment_data(datafile, params)
-    idx = select_roi(time_all, pup_all, pdwn_all)
+    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
     validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="selected ROI")
     fit = fit_selected_window(time_all, pup_all, pdwn_all, idx, params)
 
@@ -1782,23 +1944,55 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     N = len(time_roi)
     if N < 2:
         raise ValueError("Selected ROI is too short for continuous processing.")
-    del_t = (time_roi[-1] - time_roi[0]) / (N - 1)
+    if not np.isfinite(T_main) or T_main <= 0:
+        raise ValueError(f"Initial fitted period T={T_main:.6g} is invalid.")
+    if np.any(np.diff(time_roi) <= 0):
+        raise ValueError("Time values in the selected ROI must be strictly increasing for continuous processing.")
+
     periods_2_proc = params.get('periods_2_proc')
     if periods_2_proc is None:
         periods_2_proc = prompt("How many periods do you want to process?", 5, cast=int)
-    N2proc = int(np.floor(periods_2_proc * T_main / del_t))
-    step = int(np.floor(T_main / del_t))
-    if step < 1:
-        raise ValueError("Continuous processing step is <1 sample; check period/time units.")
-    if N2proc + 1 >= N:
+    if periods_2_proc <= 0:
+        raise ValueError("periods_2_proc must be > 0.")
+
+    window_duration = periods_2_proc * T_main
+    step_duration = T_main
+    if time_roi[0] + window_duration > time_roi[-1]:
         raise ValueError(
             "Selected ROI is too short for continuous processing with "
             f"periods_2_proc={periods_2_proc}. Select a longer ROI or reduce periods_2_proc."
         )
 
+    window_bounds = []
+    m = 0
+    while m < N:
+        window_start_time = time_roi[m]
+        window_stop_time = window_start_time + window_duration
+        if window_stop_time > time_roi[-1]:
+            break
+        n = int(np.searchsorted(time_roi, window_stop_time, side='right'))
+        if n > m + 1:
+            window_bounds.append((m, n, window_start_time + 0.5 * window_duration))
+
+        next_m = int(np.searchsorted(time_roi, window_start_time + step_duration, side='left'))
+        if next_m <= m:
+            next_m = m + 1
+        m = next_m
+
+    if not window_bounds:
+        raise ValueError(
+            "No valid time-based continuous windows were found. "
+            "Check period/time units or reduce periods_2_proc."
+        )
+
     print(
         f"Continuous processing limited to selected ROI: indices {roi_start}:{roi_end} "
         f"({N} samples)."
+    )
+    print(
+        f"Continuous windows use actual timestamps: {len(window_bounds)} window(s), "
+        f"duration={window_duration:.6g} s ({periods_2_proc} periods), "
+        f"step={step_duration:.6g} s (1 period)."
     )
 
     A = np.empty(0, dtype=float)
@@ -1822,12 +2016,24 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     thickness_std_mm = np.empty(0, dtype=float)
 
     area = np.pi * (params['dia'] / 2000) ** 2
+    debug_bestfit = params.get('debug_bestfit', False)
+    debug_bestfit_every = max(1, int(params.get('debug_bestfit_every', 1)))
+    debug_bestfit_pause = float(params.get('debug_bestfit_pause', 0.05))
+    processed_windows = 0
+    debug_bestfit_started = False
+    debug_bestfit_dir = None
+    if debug_bestfit:
+        debug_bestfit_dir = Path(outfile).with_suffix('')
+        debug_bestfit_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            "debug_bestfit enabled: Figure 8 will show raw data, best-fit curves, "
+            "and fit parameters for selected continuous windows."
+        )
+        print(f"debug_bestfit figures will be saved to: {debug_bestfit_dir}")
 
-    m = 0
-    n = N2proc + 1
     skipped_windows = 0
-    with tqdm(total=N, desc="Continuous processing") as pbar:
-        while n < N:
+    with tqdm(total=len(window_bounds), desc="Continuous processing") as pbar:
+        for m, n, window_center_time in window_bounds:
             try:
                 updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(
                     pup_roi[m:n], pdwn_roi[m:n], time_roi[m:n], params['N'], params['Tmin'], params['Tmax']
@@ -1851,10 +2057,8 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
             except (RuntimeError, ValueError, TypeError, FloatingPointError, np.linalg.LinAlgError) as exc:
                 skipped_windows += 1
                 if skipped_windows <= 5:
-                    tqdm.write(f"Skipping continuous window {roi_start + m}:{roi_start + n}: {exc}")
-                m += step
-                n += step
-                pbar.update(step)
+                    tqdm.write(f"Skipping continuous window {roi_start + m}:{roi_start + n - 1}: {exc}")
+                pbar.update(1)
                 continue
 
             A = np.append(A, Ai)
@@ -1863,7 +2067,7 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
             phierr = np.append(phierr, phierri)
             T = np.append(T, Ti)
             T_err = np.append(T_err, up_err[1])
-            time2 = np.append(time2, (time_roi[n] + time_roi[m]) / 2)
+            time2 = np.append(time2, window_center_time)
             xi = np.append(xi, bern['xi'])
             eta = np.append(eta, bern['eta'])
             eta_err = np.append(eta_err, bern['eta_err'])
@@ -1876,10 +2080,29 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
             up_amp = np.append(up_amp, updata[0])
             thickness_mm = np.append(thickness_mm, l * 1000)
             thickness_std_mm = np.append(thickness_std_mm, l_std * 1000)
+            processed_windows += 1
 
-            m += step
-            n += step
-            pbar.update(step)
+            if debug_bestfit and ((processed_windows - 1) % debug_bestfit_every == 0):
+                if debug_bestfit_started and not plt.fignum_exists(8):
+                    debug_bestfit = False
+                    tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+                else:
+                    debug_bestfit_started = True
+                    debug_bestfit_path = debug_bestfit_dir / (
+                        f"figure8_window_{processed_windows:04d}_"
+                        f"idx_{roi_start + m}_{roi_start + n - 1}.png"
+                    )
+                    debug_bestfit = plot_bestfit_debug(
+                        time_roi[m:n], pup_roi[m:n], pdwn_roi[m:n],
+                        updata, dwndata, bern, Ai, Aerri, phii, phierri,
+                        processed_windows, roi_start + m, roi_start + n,
+                        l * 1000, l_std * 1000, debug_bestfit_pause,
+                        save_path=debug_bestfit_path
+                    )
+                    if not debug_bestfit:
+                        tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+
+            pbar.update(1)
 
     if skipped_windows:
         print(f"Skipped {skipped_windows} continuous window(s) because the fit or Bernabé solve was invalid.")

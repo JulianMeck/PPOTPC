@@ -74,6 +74,12 @@ w = 0.5
 Tmin = 10
 #max period s
 Tmax = 10000 
+# print Bernabé xi boundary/cutoff diagnostics during main fits
+xi_debug = false
+# show measured data and best-fit curves for continuous moving windows
+debug_bestfit = false
+debug_bestfit_every = 1
+debug_bestfit_pause = 0.05
 ```
 You can set the column number in the input data file for time, upstream pressure and downstream pressure using the parameters ```time_col```, ```Pup_col``` and ```Pdwn_col```. Then also the number of header rows needs to be set with ```HeaderRows```. The specific pore fluid used in the experiment can be set be setting the parameter ```permeant``` to either 'water', 'argon' or 'rheolube' the three main permeants used in the lab in Manchester. Other permeants could be used but the compressibility and viscosity would need to be defined.  For water the compressibity and viscosity is calculated from pressure and temperature using the International Assocation for the Properties of Water and Steam (IAPWS) python project for calculating the properties of water ```iapws```. For argon there is a python script written by Julian that calculates the compressibilty and viscosity from pressure and temperature using published formulations.  For Rheolube there is a procedure in the script that calculates the compressibilty and viscosity from pressure and temperature using published formulations.  
 
@@ -146,7 +152,7 @@ proc_type = sin
 
 Use `proc_type = sin` for the standard workflow where one region of interest is selected and one permeability result is appended to the output CSV.
 
-Use `proc_type = cont` for continuous/cycling pore-pressure experiments where permeability is calculated through time using a moving window. The wave period should be approximately constant over the selected data. The selected region of interest is used to estimate the initial wave parameters, then the script processes only that selected ROI with windows of `periods_2_proc` periods and steps forward by one period:
+Use `proc_type = cont` for continuous/cycling pore-pressure experiments where permeability is calculated through time using a moving window. The wave period should be approximately constant over the selected data. The selected region of interest is used to estimate the initial wave parameters, then the script processes only that selected ROI with time-based windows of `periods_2_proc` periods and steps forward by one period. Window start/stop positions are chosen from the actual timestamps, not from a fixed number of sample indices:
 
 ```ini
 [Processing]
@@ -201,6 +207,26 @@ The output CSV includes `Thickness_mm` and `ThicknessStd_mm`: for `sin` they ref
 
 When the Bernabé solution lies on the `xi = 0` boundary, `Storage Capacity` is written as `0`, while `delbeta` is written as `NaN` because the uncertainty of a boundary-pinned storage term is not defined.
 
+To diagnose why `xi` is being set to zero, enable optional debug output:
+
+```ini
+[Fitting]
+xi_debug = true
+```
+
+This prints `A`, `phi`, the `xi = 0` boundary phase `phi_xi0`, `phi - phi_xi0`, interpolated starting values, and whether the numerical `xi < 1e-4` floor/cutoff was applied during the main Bernabé solve. Bootstrap solves are not printed.
+
+To inspect the sine fit used inside continuous processing, enable:
+
+```ini
+[Fitting]
+debug_bestfit = true
+debug_bestfit_every = 1
+debug_bestfit_pause = 0.05
+```
+
+This updates Figure 8 during `proc_type = cont` with two stacked subplots: upstream measured data as black points with the upstream best fit as a solid red line, and downstream measured data as black points with the downstream best fit as a solid blue line. The downstream subplot also shows the fitted offset + linear trend component as a solid cyan line. Each plotted Figure 8 is saved automatically as a PNG in a subfolder with the same stem as the output CSV, for example `data/s2077RED/figure8_window_0001_idx_...png` for `data/s2077RED.csv`. Increase `debug_bestfit_every` to plot/save fewer windows, or increase `debug_bestfit_pause` to keep each debug window visible longer. Use a finite pause value; indefinite GUI waits can freeze with TkAgg when the figure is closed. Closing Figure 8 disables `debug_bestfit` and lets the continuous analysis continue normally.
+
 ### Replotting continuous CSV results
 
 Continuous permeability/storage results can be replotted from an existing output CSV without rerunning the full processing workflow:
@@ -225,6 +251,18 @@ For a non-interactive save:
 
 ```bash
 python plot_nomogram_results.py data/s2077RED.csv --save s2077RED_nomogram.png --no-show
+```
+
+For diagnostics of whether points fall below the `xi = 0` nomogram boundary, plot upstream amplitude, gain, phase, and `phi - arccos(Gain)` through time:
+
+```bash
+python plot_continuous_diagnostics.py data/s2077RED.csv
+```
+
+Negative `phi - arccos(Gain)` values are below the `xi = 0` boundary. To save without opening a plot window:
+
+```bash
+python plot_continuous_diagnostics.py data/s2077RED.csv --save s2077RED_diagnostics.png --no-show
 ```
 
 ## LSSA Method
