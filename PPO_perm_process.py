@@ -1263,14 +1263,15 @@ def prompt_processing_parameters():
     return params
 
 
-def load_processing_config(datafile):
+def load_processing_config(datafile, outfile=None):
     """
     Load processing parameters using the config-file workflow.
 
     Search order:
-      1. <selected-data-file>.ini
-      2. config.ini beside this script
-      3. interactive prompts
+      1. <selected-output-csv>.ini, when an output path is provided
+      2. <selected-data-file>.ini
+      3. config.ini beside this script
+      4. interactive prompts
 
     Storage fields belong in [Storage]: mode plus either Dv/Dv_err or
     bd/bd_err. Legacy configs using bd_mode, or with Dv/bd under [Sample],
@@ -1279,7 +1280,21 @@ def load_processing_config(datafile):
     """
     script_root = Path(__file__).resolve().parent
     data_path = Path(datafile)
-    candidates = [data_path.with_suffix('.ini'), script_root / 'config.ini']
+    candidates = []
+    if outfile:
+        candidates.append(Path(outfile).with_suffix('.ini'))
+    candidates.extend([data_path.with_suffix('.ini'), script_root / 'config.ini'])
+
+    # Preserve search order while avoiding duplicate paths, e.g. when output and
+    # data file share the same stem.
+    unique_candidates = []
+    seen_candidates = set()
+    for candidate in candidates:
+        candidate_key = candidate.resolve() if candidate.exists() else candidate.absolute()
+        if candidate_key not in seen_candidates:
+            unique_candidates.append(candidate)
+            seen_candidates.add(candidate_key)
+    candidates = unique_candidates
 
     config_file = next((candidate for candidate in candidates if candidate.exists()), None)
     if config_file is None:
@@ -1480,6 +1495,20 @@ def _mat_vector(mat_data, var_name, scale=1.0):
 
 def load_experiment_data(datafile, params):
     """Load time, pressures, confining pressure, and optional thickness series."""
+    data_suffix = Path(datafile).suffix.lower()
+    if params['file_mode'] == 'dat' and data_suffix == '.mat':
+        raise ValueError(
+            f"Config file {params.get('config_file', '<interactive>')} has [File] mode = dat, "
+            f"but the selected input file is MATLAB data: {os.path.basename(datafile)}. "
+            "Set [File] mode = mat in the matching .ini file, or use an output-specific .ini "
+            "such as <output-csv-stem>.ini."
+        )
+    if params['file_mode'] == 'mat' and data_suffix not in ('', '.mat'):
+        raise ValueError(
+            f"Config file {params.get('config_file', '<interactive>')} has [File] mode = mat, "
+            f"but the selected input file does not have a .mat extension: {os.path.basename(datafile)}."
+        )
+
     if params['file_mode'] == 'dat':
         all_file = np.loadtxt(datafile, delimiter='\t', skiprows=params['HeaderRows'])
         time = all_file[:, params['time_col']]
@@ -2276,7 +2305,7 @@ def main():
             break
 
         print(f"\nLoading data from: {os.path.basename(datafile)}")
-        params = load_processing_config(datafile)
+        params = load_processing_config(datafile, outfile)
         print_input_summary(params, datafile)
 
         if params['proc_type'] == 'cont':

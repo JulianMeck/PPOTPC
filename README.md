@@ -105,7 +105,7 @@ bd = 2.2522378352e-15
 bd_err = 5e-17
 ```
 
-If `mode` is omitted, the script uses `bd` mode when a `bd` value is present; otherwise it falls back to the older `Dv` mode. Legacy configs using `bd_mode` are still accepted. The script first looks for an `.ini` file with the same base name as the selected data file, then falls back to the root `config.ini`.
+If `mode` is omitted, the script uses `bd` mode when a `bd` value is present; otherwise it falls back to the older `Dv` mode. Legacy configs using `bd_mode` are still accepted. The script first looks for an `.ini` file with the same base name as the selected output CSV, then for an `.ini` file with the same base name as the selected data file, and finally falls back to the root `config.ini`. This allows the same input data file to be processed in multiple ways by choosing different output CSV names and matching `.ini` files.
 
 ### Data file mode: `dat` or `mat`
 
