@@ -64,6 +64,9 @@ Pc_col = 3
 [Processing]
 # processing type: sin for one selected oscillation interval, cont for continuous moving-window processing
 proc_type = sin
+# Optional: set both to skip manual ROI selection and use this time interval directly
+# start_time_s = 0
+# end_time_s = 1000
 
 [Fitting]
 # No of remaples for bootstrapping
@@ -351,12 +354,12 @@ Before running the script, set user inputs in the `.ini` config file as describe
 When you run the script you will be asked: 
 1) where you want to save the processed data.
 2) where the experimental data file is.
-3) select the start of data you want to process and the end on the figure.
+3) select the start of data you want to process and the end on the figure, unless `[Processing] start_time_s` and `end_time_s` are set in the `.ini` file.
 4) the script will chugg away and calculate permeability and display amplitude and phase shit on the nomogram.
 5) asked whether you want to process another data set if yes you goto step 2 above if no end
 6) output file is saved.
 ## Continuous Data
-There is functionality in this version to calculate how permeability varies with time. Set `[Processing] proc_type = cont` in the `.ini` file. The wave period should be approximately constant over the whole dataset. First, select a region of interest to calculate the initial wave parameters. The script then calculates permeability for a moving window of `periods_2_proc` waves and steps the window forward by one whole period. The data are plotted as time series and on the nomogram, and the processed data are saved as a CSV file.
+There is functionality in this version to calculate how permeability varies with time. Set `[Processing] proc_type = cont` in the `.ini` file. The wave period should be approximately constant over the selected region. First, select a region of interest to calculate the initial wave parameters, either interactively or by setting `start_time_s` and `end_time_s` in `[Processing]`. The script then calculates permeability for a moving window of `periods_2_proc` waves and steps the window forward by one whole period. The data are plotted as time series and on the nomogram, and the processed data are saved as a CSV file.
 ## Acknowledgements
 This code has been under development for many years with involvement from a number of coleagues in Manchester and Liverpool including: Ernie Rutter, Rosanne McKernan, Kier Groves, Mike Chandler, Rochelle Taylor, Yusuf Bashir, Lining Yang, Pete Armitage, John Bedford... Note need to add more people from Liverpool.
 

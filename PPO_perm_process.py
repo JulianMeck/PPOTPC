@@ -1242,7 +1242,11 @@ def prompt_processing_parameters():
             break
         print(f"  ⚠  Invalid choice '{proc_type}'. Please enter one of: {valid_proc_type}")
 
-    params['periods_2_proc'] = 5
+    params['periods_2_proc'] = None
+    params['start_time_s'] = None
+    params['end_time_s'] = None
+    if params['proc_type'] == 'cont':
+        params['periods_2_proc'] = prompt("How many periods do you want to process?", 5, cast=int)
 
     while True:
         thickness_mode = prompt("Thickness mode [fixed/mean]", "fixed", cast=str).strip().lower()
@@ -1337,6 +1341,18 @@ def load_processing_config(datafile, outfile=None):
     )
     if params['periods_2_proc'] is not None and params['periods_2_proc'] <= 0:
         raise ValueError("periods_2_proc must be > 0.")
+    params['start_time_s'] = _config_get(config, ('Processing', 'File'), 'start_time_s', float, default=None)
+    params['end_time_s'] = _config_get(config, ('Processing', 'File'), 'end_time_s', float, default=None)
+    if (params['start_time_s'] is None) != (params['end_time_s'] is None):
+        raise ValueError(
+            "start_time_s and end_time_s must be provided together, or both omitted "
+            "to use interactive ROI selection."
+        )
+    if params['start_time_s'] is not None:
+        if not np.isfinite(params['start_time_s']) or not np.isfinite(params['end_time_s']):
+            raise ValueError("start_time_s and end_time_s must be finite values in seconds.")
+        if params['start_time_s'] >= params['end_time_s']:
+            raise ValueError("start_time_s must be smaller than end_time_s.")
 
     thickness_mode = _config_get(config, ('Sample', 'Processing'), 'thickness_mode', str, default=None)
     if thickness_mode is None:
@@ -1472,6 +1488,8 @@ def print_input_summary(params, datafile):
         )
     if params['proc_type'] == 'cont' and params.get('periods_2_proc') is not None:
         print(f"  Continuous:  periods per window = {params['periods_2_proc']}")
+    if params.get('start_time_s') is not None:
+        print(f"  ROI:         {params['start_time_s']} s to {params['end_time_s']} s [from config]")
     print("=" * 60)
 
 
@@ -1572,6 +1590,81 @@ def roi_bounds(idx):
     if start == end:
         raise ValueError("Selected ROI has zero length; click two different points.")
     return start, end
+
+
+def roi_from_time_bounds(time, start_time_s, end_time_s):
+    """Return inclusive ROI indices from configured time bounds in seconds."""
+    time = np.asarray(time, dtype=float)
+    if time.ndim != 1 or time.size < 2:
+        raise ValueError("Time data must be a one-dimensional array with at least two points.")
+    if not np.all(np.isfinite(time)):
+        raise ValueError("Time data contain non-finite values; cannot use configured ROI bounds.")
+
+    data_min = float(np.min(time))
+    data_max = float(np.max(time))
+    if start_time_s < data_min or end_time_s > data_max:
+        raise ValueError(
+            "Configured ROI is outside the available time range: "
+            f"start_time_s={start_time_s}, end_time_s={end_time_s}, "
+            f"data range={data_min} to {data_max} s."
+        )
+
+    increasing = np.all(np.diff(time) >= 0)
+    if increasing:
+        start = int(np.searchsorted(time, start_time_s, side='left'))
+        end = int(np.searchsorted(time, end_time_s, side='right')) - 1
+    else:
+        mask = (time >= start_time_s) & (time <= end_time_s)
+        if not np.any(mask):
+            raise ValueError(
+                "Configured ROI contains no samples: "
+                f"start_time_s={start_time_s}, end_time_s={end_time_s}."
+            )
+        selected = np.where(mask)[0]
+        start = int(selected[0])
+        end = int(selected[-1])
+
+    if start < 0 or end >= len(time) or start >= end:
+        raise ValueError(
+            "Configured ROI contains fewer than two samples: "
+            f"start_time_s={start_time_s}, end_time_s={end_time_s}."
+        )
+    return list(roi_bounds((start, end)))
+
+
+def plot_selected_roi(time, pup, pdwn, idx, params=None, thickness=None, title='Selected Data Range'):
+    """Show Figure 2 with the final selected/configured ROI."""
+    fig_selected = plt.figure(2)
+    fig_selected.clf()
+    ax_selected = fig_selected.add_subplot(111)
+    ax_selected.plot(time, pup, 'r', label='Upstream Pressure')
+    ax_selected.plot(time, pdwn, 'b', label='Downstream Pressure')
+    ax_selected.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
+    ax_selected.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
+    ax_selected.set_xlabel('Time (s)')
+    ax_selected.set_ylabel('Pressure (MPa)')
+    ax_selected.set_title(title)
+    ax_selected.legend(loc='upper left')
+    ax_selected.grid(True, linestyle='--', alpha=0.35)
+
+    if params is not None and params.get('thickness_mode') == 'mean' and thickness is not None:
+        thickness_values = np.asarray(thickness, dtype=float)
+        if len(thickness_values) == len(time):
+            valid_thickness = np.isfinite(thickness_values)
+            if np.any(valid_thickness):
+                ax_thickness = ax_selected.twinx()
+                ax_thickness.plot(
+                    time[valid_thickness], thickness_values[valid_thickness],
+                    color='tab:green', lw=0.9, alpha=0.8,
+                )
+                ax_thickness.set_ylabel('Thickness (mm)', color='tab:green')
+                ax_thickness.tick_params(axis='y', labelcolor='tab:green')
+                ax_thickness.spines['right'].set_color('tab:green')
+    tile_figure(2, row=0, col=1)
+    make_figure_topmost(fig_selected)
+    plt.show(block=False)
+    plt.pause(0.1)
+    return fig_selected
 
 
 def validate_thickness_range(params, thickness, start, stop, context="selected ROI"):
@@ -1737,7 +1830,20 @@ def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, be
 
 
 def select_roi(time, pup, pdwn, params=None, thickness=None):
-    """Interactively select and refine a region of interest."""
+    """Select/refine a region of interest interactively or from config."""
+    if params is not None and params.get('start_time_s') is not None:
+        print("\nSTEP 3: Using ROI from config file")
+        print(f"        start_time_s = {params['start_time_s']} s")
+        print(f"        end_time_s   = {params['end_time_s']} s")
+        idx = roi_from_time_bounds(time, params['start_time_s'], params['end_time_s'])
+        print(
+            f"        Selected indices {idx[0]}:{idx[1]} "
+            f"({time[idx[0]]:.6g} to {time[idx[1]]:.6g} s)"
+        )
+        plot_selected_roi(time, pup, pdwn, idx, params=params, thickness=thickness,
+                          title='Selected Data Range from Config')
+        return idx
+
     print("\nSTEP 3: Interactive plot will appear")
     print("        Click 2 points to select COARSE region of interest")
 
@@ -1783,36 +1889,7 @@ def select_roi(time, pup, pdwn, params=None, thickness=None):
     idx = [tree.query(pt)[1] for pt in pts]
     idx = list(roi_bounds(idx))
 
-    fig_selected = plt.figure(2)
-    fig_selected.clf()
-    ax_selected = fig_selected.add_subplot(111)
-    ax_selected.plot(time, pup, 'r', label='Upstream Pressure')
-    ax_selected.plot(time, pdwn, 'b', label='Downstream Pressure')
-    ax_selected.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
-    ax_selected.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
-    ax_selected.set_xlabel('Time (s)')
-    ax_selected.set_ylabel('Pressure (MPa)')
-    ax_selected.set_title('Selected Data Range')
-    ax_selected.legend(loc='upper left')
-    ax_selected.grid(True, linestyle='--', alpha=0.35)
-
-    if params is not None and params.get('thickness_mode') == 'mean' and thickness is not None:
-        thickness_values = np.asarray(thickness, dtype=float)
-        if len(thickness_values) == len(time):
-            valid_thickness = np.isfinite(thickness_values)
-            if np.any(valid_thickness):
-                ax_thickness = ax_selected.twinx()
-                ax_thickness.plot(
-                    time[valid_thickness], thickness_values[valid_thickness],
-                    color='tab:green', lw=0.9, alpha=0.8,
-                )
-                ax_thickness.set_ylabel('Thickness (mm)', color='tab:green')
-                ax_thickness.tick_params(axis='y', labelcolor='tab:green')
-                ax_thickness.spines['right'].set_color('tab:green')
-    tile_figure(2, row=0, col=1)
-    make_figure_topmost(fig_selected)
-    plt.show(block=False)
-    plt.pause(0.1)
+    plot_selected_roi(time, pup, pdwn, idx, params=params, thickness=thickness)
     return idx
 
 
