@@ -1933,6 +1933,8 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="selected ROI")
     fit = fit_selected_window(time_all, pup_all, pdwn_all, idx, params)
 
+    # Select ROI for continuous processing
+    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
     roi_start, roi_end = idx[0], idx[1]
     roi_stop = roi_end + 1
     time_roi = time_all[roi_start:roi_stop]
