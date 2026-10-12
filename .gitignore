@@ -1,3 +1,10 @@
+# Custom
+data/
+example/
+notes.md
+FUTURE_WORK.md
+SESSION_NOTES.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
