@@ -47,7 +47,7 @@ def bern_complex(eta, xi):
 
     if phase > 0:
         phase -= 2 * np.pi
-    phase = -phase
+    phase=phase*-1 # flip sign to match Bernabé's convention
     return gain, phase
 
 
@@ -164,7 +164,7 @@ def plot_nomogram_csv(csv_file, save=None, show=True, show_errors=True, show_leg
         )
 
     gain = data['Gain'].to_numpy(dtype=float)
-    phase = np.abs(data['Phase'].to_numpy(dtype=float))
+    phase = data['Phase'].to_numpy(dtype=float)
     valid = np.isfinite(gain) & np.isfinite(phase) & (gain > 0)
     gain = gain[valid]
     phase = phase[valid]

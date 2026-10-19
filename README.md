@@ -160,6 +160,8 @@ proc_type = cont
 periods_2_proc = 5
 ```
 
+Set `periods_2_proc` in the `.ini` file whenever `proc_type = cont`; it must be a positive integer. Continuous processing reads this setting directly and does not ask for it at the command prompt.
+
 During continuous processing, individual windows can be skipped if the sine fit does not converge or if the fitted gain is outside the physical Bernabé domain (`0 < A < 1`). The run continues and reports how many windows were skipped. The continuous permeability/storage plot uses base-10 logarithmic y-axes and shaded `± error` bands when positive values are available; if a series is entirely non-positive, that axis falls back to linear scale with a note on the plot. Non-positive values are retained in the CSV.
 
 By default, both `sin` and `cont` processing use the fixed sample length `l` from `[Sample]`:

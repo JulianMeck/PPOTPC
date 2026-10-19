@@ -52,7 +52,7 @@ def choose_csv_file():
 def boundary_margin(gain, phase):
     """Return phi - arccos(gain); negative values are below xi=0 boundary."""
     gain = np.asarray(gain, dtype=float)
-    phase = np.abs(np.asarray(phase, dtype=float))
+    phase = np.asarray(phase, dtype=float)
     margin = np.full_like(gain, np.nan, dtype=float)
     valid = np.isfinite(gain) & np.isfinite(phase) & (gain > 0) & (gain < 1)
     margin[valid] = phase[valid] - np.arccos(gain[valid])
@@ -74,7 +74,7 @@ def plot_diagnostics_csv(csv_file, save=None, show=True):
     time = data['Time'].to_numpy(dtype=float)
     up_amp = data['UpAmp'].to_numpy(dtype=float)
     gain = data['Gain'].to_numpy(dtype=float)
-    phase = np.abs(data['Phase'].to_numpy(dtype=float))
+    phase = data['Phase'].to_numpy(dtype=float)
     margin = boundary_margin(gain, phase)
 
     below = np.isfinite(margin) & (margin < 0)
@@ -91,7 +91,7 @@ def plot_diagnostics_csv(csv_file, save=None, show=True):
     axes[1].set_ylabel('Gain A')
 
     axes[2].plot(time, phase, color='tab:purple', lw=1.0)
-    axes[2].set_ylabel('|Phase| rad')
+    axes[2].set_ylabel('Phase lag rad')
 
     axes[3].axhline(0.0, color='k', lw=0.9)
     axes[3].fill_between(

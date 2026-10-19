@@ -177,8 +177,8 @@ def lookup_table():
     xi_lookup=mat_data['xi']
     return A_lookup,phi_lookup,eta_lookup,xi_lookup
 def fitboth(b0,f,xm,yup,ydwn):
-    gup=b0[0]*np.sin(2*np.pi*f*xm+b0[1])+b0[2]
-    gdwn=b0[3]*np.sin(2*np.pi*f*xm+b0[4])+b0[5]
+    gup=b0[0]*np.sin(2*np.pi*f*xm-b0[1])+b0[2]
+    gdwn=b0[3]*np.sin(2*np.pi*f*xm-b0[4])+b0[5]
     E=np.sum(np.abs(gup-yup)**2)+np.sum(np.abs(gdwn-ydwn)**2)
     return E
 def get_freq(y,t,Tmax,Tmin):
@@ -250,7 +250,8 @@ def ls_sin_fit(y, t, fw):
     # ----------------------------------------------------
     
     # Clean Phase calculation (replaces your 180-degree loop)
-    phase = np.arctan2(bta, alpha)
+    # Express phase using y = amp * sin(omega*t - phase) + offset.
+    phase = -np.arctan2(bta, alpha)
     amp = np.sqrt(alpha**2 + bta**2)
     
     # Bound phase strictly between -pi and pi
@@ -268,6 +269,8 @@ def fit_sines2(up, dwn, t_raw, Tmax, Tmin, return_errors=False):
     Fit sinusoids to upstream and downstream pressure data.
     The upstream data ('up') is fitted with a pure sine wave.
     The downstream data ('dwn') is fitted with a linear trend + sine wave (shared period).
+    Both models use sin(2*pi*freq*t - phase); a downstream lag therefore
+    has phase_dwn - phase_up > 0.
 
     Returns
     -------
@@ -300,8 +303,10 @@ def fit_sines2(up, dwn, t_raw, Tmax, Tmin, return_errors=False):
     guess_amp_dwn = np.sqrt(theta_dwn[1]**2 + theta_dwn[2]**2)
     guess_offset_up = theta_up[0]+np.mean(up)
     guess_offset_dwn = theta_dwn[0]+np.mean(dwn)
-    guess_phase_up = np.arctan2(theta_up[2], theta_up[1])
-    guess_phase_dwn = np.arctan2(theta_dwn[2], theta_dwn[1])
+    # Lomb-Scargle models sin(w*t + delta); convert to the fitted
+    # sin(w*t - phase) convention.
+    guess_phase_up = -np.arctan2(theta_up[2], theta_up[1])
+    guess_phase_dwn = -np.arctan2(theta_dwn[2], theta_dwn[1])
     
     # 3. Define the combined model for curve_fit
     # Stacking up and dwn into one array enforces a SHARED frequency parameter
@@ -310,9 +315,9 @@ def fit_sines2(up, dwn, t_raw, Tmax, Tmin, return_errors=False):
         t_half = t_combined[:N]
         
         # Upstream: Pure Sine wave + Offset
-        model_up = amp_up * np.sin(2 * np.pi * freq * t_half + phase_up) + offset_up
+        model_up = amp_up * np.sin(2 * np.pi * freq * t_half - phase_up) + offset_up
         # Downstream: Sine wave + Linear Trend (slope * t + offset)
-        model_dwn = amp_dwn * np.sin(2 * np.pi * freq * t_half + phase_dwn) + (slope_dwn * t_half + offset_dwn)
+        model_dwn = amp_dwn * np.sin(2 * np.pi * freq * t_half - phase_dwn) + (slope_dwn * t_half + offset_dwn)
         
         return np.concatenate([model_up, model_dwn])
 
@@ -397,8 +402,8 @@ def sin_fits_bootstrap(up, dwn, t, Num, Tmin, Tmax):
     freq     = 1 / upfit[1]
     #print(f"Period: {upfit[1]:.3e} s")
     #print(f"Frequecy: {freq:.3e} Hz")
-    yfit_up  = upfit[0]  * np.sin(2 * np.pi * freq * t + upfit[2])  + upfit[3]
-    yfit_dwn = dwnfit[0] * np.sin(2 * np.pi * freq * t + dwnfit[2]) + dwnfit[3] + dwnfit[4] * t
+    yfit_up  = upfit[0]  * np.sin(2 * np.pi * freq * t - upfit[2])  + upfit[3]
+    yfit_dwn = dwnfit[0] * np.sin(2 * np.pi * freq * t - dwnfit[2]) + dwnfit[3] + dwnfit[4] * t
     res_up   = up  - yfit_up
     res_dwn  = dwn - yfit_dwn
 
@@ -445,7 +450,7 @@ def sin_fits_bootstrap(up, dwn, t, Num, Tmin, Tmax):
 def plot_bootstrap_distributions(params_up, params_dwn, original_up, original_dwn,plt_num):
     param_names = ['Amplitude', 'Period', 'Phase', 'Offset']
     plt.close(plt_num)
-    fig, axes = plt.subplots(4, 2, figsize=(8, 9), num=plt_num, clear=True)
+    fig, axes = plt.subplots(4, 2, figsize=(12, 9), num=plt_num, clear=True)
     
     #axes = fig.subplots(4, 2)
     params_dwn = np.where(np.isinf(params_dwn), np.nan, params_dwn)
@@ -471,7 +476,7 @@ def plot_bootstrap_distributions(params_up, params_dwn, original_up, original_dw
     
     fig.tight_layout(rect=[0, 0, 1, 1], h_pad=2.0)
     #plt.subplots_adjust(top=0.95, bottom=0.05)
-    tile_figure(plt_num, row=0, col=2, row_span=2)
+    tile_figure(plt_num, row=0, col=1, row_span=2)
     make_figure_topmost(fig)  # Force figure to top
     plt.show(block=False)
     plt.pause(0.1)
@@ -512,10 +517,11 @@ def _bern_complex(eta, xi):
     val = ((1 + 1j) / np.sqrt(eta * xi) * np.sinh(s) + np.cosh(s)) ** (-1)
     A_i   = np.abs(val)
     phi_i = np.angle(val)
-    # Range correction: MATLAB uses phi_i*-1 after ensuring phi_i<=0
+    # Bernabé's positive lag is the negative complex argument. Keep the
+    # equivalent negative branch when angle() returns a positive argument.
     if phi_i > 0:
         phi_i -= 2 * np.pi
-    phi_i = -phi_i          # flip sign → phi_i is now positive (0 … pi)
+    phi_i = -phi_i
     return A_i, phi_i
 
 
@@ -572,8 +578,10 @@ def solve_bern_eq(A, phi, w, debug=False):
     """
     if not np.isfinite(A) or A <= 0 or A >= 1:
         raise ValueError(f"Gain A={A:.6g} is outside the Bernabé domain 0 < A < 1.")
-    if not np.isfinite(phi):
-        raise ValueError("Phase shift is not finite.")
+    if not np.isfinite(phi) or not 0 < phi < np.pi:
+        raise ValueError(
+            f"Phase shift phi={phi:.6g} is outside the Bernabé domain 0 < phi < pi."
+        )
 
     from scipy.optimize import fsolve
 
@@ -821,8 +829,10 @@ def bern_errors(x_sol, A,Aerr, phi, w, eta, xi,up_params_bs,dwn_params_bs):
             xi_err  = np.nan
         else:
             Adist   = dwn_params_bs[:, 0] / up_params_bs[:, 0]
-            phidist = up_params_bs[:, 2] - dwn_params_bs[:, 2]
-            phidist[phidist < 0] += 2 * np.pi
+            phidist = np.arctan2(
+                np.sin(dwn_params_bs[:, 2] - up_params_bs[:, 2]),
+                np.cos(dwn_params_bs[:, 2] - up_params_bs[:, 2]),
+            )
             eta_dist = np.full_like(Adist, np.nan)
             xi_dist  = np.full_like(Adist, np.nan)
             for _p, (_Ai, _phi_i) in enumerate(zip(Adist, phidist)):
@@ -942,6 +952,13 @@ def plot_nomo(plt_num, no_leg='no'):
     return ax   # return main axis so caller can plot points on it
 
 
+def ensure_nomogram_axis(nomo_ax, no_leg='no'):
+    """Return a live nomogram axis, creating the shared figure when needed."""
+    if nomo_ax is None or not plt.fignum_exists(nomo_ax.figure.number):
+        return plot_nomo(7, no_leg=no_leg)
+    return nomo_ax
+
+
 # Viscosity and compressibility calculations
 def argon(Temp,P):
     # T in K and P in Pa
@@ -1047,7 +1064,7 @@ def prompt(message, default, cast=float):
     return cast(raw)
 
 
-def tile_figure(fig_num, row, col, tot_rows=2, tot_cols=3, row_span=1, col_span=1):
+def tile_figure(fig_num, row, col, tot_rows=2, tot_cols=2, row_span=1, col_span=1):
     """
     Position a Matplotlib figure in a screen tile when the active GUI backend
     exposes a window geometry API. This preserves the v3 multi-window layout
@@ -1225,9 +1242,7 @@ def prompt_processing_parameters():
             break
         print(f"  ⚠  Invalid choice '{proc_type}'. Please enter one of: {valid_proc_type}")
 
-    params['periods_2_proc'] = None
-    if params['proc_type'] == 'cont':
-        params['periods_2_proc'] = prompt("How many periods do you want to process?", 5, cast=int)
+    params['periods_2_proc'] = 5
 
     while True:
         thickness_mode = prompt("Thickness mode [fixed/mean]", "fixed", cast=str).strip().lower()
@@ -1301,7 +1316,12 @@ def load_processing_config(datafile):
     if proc_type not in ('sin', 'cont'):
         raise ValueError(f"Invalid processing type '{proc_type}' in {config_file}; use 'sin' or 'cont'.")
     params['proc_type'] = proc_type
-    params['periods_2_proc'] = _config_get(config, ('Processing', 'Fitting'), 'periods_2_proc', int, default=None)
+    params['periods_2_proc'] = _config_get(
+        config, ('Processing', 'Fitting'), 'periods_2_proc', int,
+        required=(proc_type == 'cont')
+    )
+    if params['periods_2_proc'] is not None and params['periods_2_proc'] <= 0:
+        raise ValueError("periods_2_proc must be > 0.")
 
     thickness_mode = _config_get(config, ('Sample', 'Processing'), 'thickness_mode', str, default=None)
     if thickness_mode is None:
@@ -1591,13 +1611,19 @@ def fitted_pressure_models(time_values, updata, dwndata):
     """Return fitted upstream/downstream models for one fitted window."""
     time_values = np.asarray(time_values, dtype=float)
     t_rel = time_values - np.nanmin(time_values)
-    upmodel = updata[0] * np.sin(2 * np.pi * t_rel / updata[1] + updata[2]) + updata[3]
+    upmodel = updata[0] * np.sin(2 * np.pi * t_rel / updata[1] - updata[2]) + updata[3]
     dwnmodel = (
-        dwndata[0] * np.sin(2 * np.pi * t_rel / dwndata[1] + dwndata[2])
+        dwndata[0] * np.sin(2 * np.pi * t_rel / dwndata[1] - dwndata[2])
         + dwndata[3]
         + dwndata[4] * t_rel
     )
     return t_rel, upmodel, dwnmodel
+
+
+def downstream_phase_lag(phase_up, phase_dwn):
+    """Return wrapped Bernabé lag phase_dwn - phase_up in [-pi, pi)."""
+    difference = np.asarray(phase_dwn) - np.asarray(phase_up)
+    return (difference + np.pi) % (2 * np.pi) - np.pi
 
 
 def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, bern,
@@ -1665,7 +1691,7 @@ def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, be
 
     fig.tight_layout()
     if not fig_exists:
-        tile_figure(8, row=0, col=2, row_span=2)
+        tile_figure(8, row=1, col=1)
         make_figure_topmost(fig)
     plt.show(block=False)
     fig.canvas.draw_idle()
@@ -1776,14 +1802,9 @@ def fit_selected_window(time, pup, pdwn, idx, params):
     A = np.abs(dwndata[0] / updata[0])
     Aerr = A * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
     logAerr = np.abs(Aerr / A / np.log(10))
-    phi = updata[2] - dwndata[2]
+    phi = float(downstream_phase_lag(updata[2], dwndata[2]))
     phierr = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
     T = updata[1]
-    if phi > np.pi:
-        phi -= 2 * np.pi
-    if phi < -np.pi:
-        phi += 2 * np.pi
-
     _, upmodel, dwnmodel = fitted_pressure_models(time_sel, updata, dwndata)
 
     fig_model = plt.figure(4)
@@ -1800,6 +1821,7 @@ def fit_selected_window(time, pup, pdwn, idx, params):
     make_figure_topmost(fig_model)
     plt.show(block=False)
     plt.pause(0.1)
+    tile_figure(2, row=0, col=0)
 
     return {
         'time': time_sel,
@@ -1879,16 +1901,15 @@ def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
         params, l, area, fit['updata'][3], fit['T'], fit['up_err'][1]
     )
 
-    if first_loop:
-        nomo_ax = plot_nomo(5)
-    nomo_ax.errorbar(abs(fit['phi']), np.log10(fit['A']), xerr=fit['phierr'], yerr=fit['logAerr'],
+    nomo_ax = ensure_nomogram_axis(nomo_ax)
+    nomo_ax.errorbar(fit['phi'], np.log10(fit['A']), xerr=fit['phierr'], yerr=fit['logAerr'],
                      fmt='o', color='blue', zorder=5, label='_nolegend_')
     nomo_ax.plot(bern['phi0'], np.log10(bern['A0']), '^', color='g', zorder=5, label='_nolegend_')
     nomo_ax.plot(bern['phifit'], np.log10(bern['Afit']), 'x', color='r',
                  markersize=8, markeredgewidth=2, zorder=5, label='_nolegend_')
-    tile_figure(5, row=1, col=1)
-    plt.figure(5).tight_layout()
-    plt.figure(5).canvas.draw_idle()
+    tile_figure(7, row=1, col=1)
+    plt.figure(7).tight_layout()
+    plt.figure(7).canvas.draw_idle()
     plt.pause(0.05)
 
     file = os.path.basename(datafile)
@@ -1923,6 +1944,7 @@ def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
     print(f"Thickness used: {l * 1000:.3f} mm")
     print(f"Permeability: {format_value_error(bern['k'], bern['kerr'], 'm²')}")
     print(f"Storage Capacity: {format_value_error(bern['bc'], bern['bc_err'], 'Pa⁻¹')}")
+    print("Close all figures to end processing.")
     print(f"{'=' * 60}")
     return nomo_ax
 
@@ -1933,6 +1955,8 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="selected ROI")
     fit = fit_selected_window(time_all, pup_all, pdwn_all, idx, params)
 
+    # Select ROI for continuous processing
+    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
     roi_start, roi_end = idx[0], idx[1]
     roi_stop = roi_end + 1
     time_roi = time_all[roi_start:roi_stop]
@@ -1951,7 +1975,10 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
 
     periods_2_proc = params.get('periods_2_proc')
     if periods_2_proc is None:
-        periods_2_proc = prompt("How many periods do you want to process?", 5, cast=int)
+        raise ValueError(
+            "Continuous processing requires periods_2_proc in the [Processing] section "
+            "of the INI file."
+        )
     if periods_2_proc <= 0:
         raise ValueError("periods_2_proc must be > 0.")
 
@@ -2040,13 +2067,9 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
                 )
                 Ai = np.abs(dwndata[0] / updata[0])
                 Aerri = Ai * np.sqrt((up_err[0] / (2 * updata[0]))**2 + (dwn_err[0] / (2 * dwndata[0]))**2)
-                phii = updata[2] - dwndata[2]
+                phii = float(downstream_phase_lag(updata[2], dwndata[2]))
                 phierri = np.sqrt((up_err[2] / 2)**2 + (dwn_err[2] / 2)**2)
                 Ti = updata[1]
-                if phii > np.pi:
-                    phii -= 2 * np.pi
-                if phii < -np.pi:
-                    phii += 2 * np.pi
 
                 l, l_std = window_length_m(params, thickness_roi, m, n)
 
@@ -2122,7 +2145,7 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
     plt.title('Phase and Gain')
-    tile_figure(5, row=1, col=1)
+    tile_figure(5, row=0, col=0)
     plt.show(block=False)
     plt.pause(0.01)
 
@@ -2157,16 +2180,15 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
         ax2.text(0.98, 0.95, 'No positive storage values for log10 scale',
                  transform=ax2.transAxes, color='b', va='top', ha='right', fontsize=9)
     ax2.tick_params(axis='y', labelcolor='b')
-    tile_figure(6, row=1, col=2)
+    tile_figure(6, row=0, col=1)
     plt.show(block=False)
     plt.pause(0.01)
 
     logAerr = np.abs(Aerr / A / np.log(10))
-    if first_loop:
-        nomo_ax = plot_nomo(7, no_leg='yes')
-    nomo_ax.errorbar(abs(phi), np.log10(A), xerr=phierr, yerr=logAerr,
+    nomo_ax = ensure_nomogram_axis(nomo_ax, no_leg='yes')
+    nomo_ax.errorbar(phi, np.log10(A), xerr=phierr, yerr=logAerr,
                      fmt='o', color='blue', zorder=5, label='_nolegend_')
-    tile_figure(7, row=1, col=1)
+    tile_figure(7, row=1, col=0)
     plt.figure(7).tight_layout()
     plt.figure(7).canvas.draw_idle()
     plt.pause(0.05)
@@ -2267,7 +2289,7 @@ def main():
             break
 
     plt.ioff()
-    plt.show()
+    plt.show(block=True)
 
 
 if __name__ == "__main__":
