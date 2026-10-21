@@ -1229,7 +1229,7 @@ def prompt_processing_parameters():
     params['debug_bestfit_every'] = 1
     params['debug_bestfit_pause'] = 0.05
     if params['debug_bestfit']:
-        params['debug_bestfit_every'] = prompt("Plot every N accepted continuous windows", 1, cast=int)
+        params['debug_bestfit_every'] = prompt("Plot every N candidate continuous windows", 1, cast=int)
         params['debug_bestfit_pause'] = prompt("Pause after each debug plot in seconds (finite value recommended)", 0.05, cast=float)
         if params['debug_bestfit_every'] < 1:
             raise ValueError("debug_bestfit_every must be >= 1.")
@@ -1483,7 +1483,7 @@ def print_input_summary(params, datafile):
     if params.get('debug_bestfit'):
         print(
             "  Debug:       debug_bestfit enabled "
-            f"(every {params.get('debug_bestfit_every', 1)} accepted window, "
+            f"(every {params.get('debug_bestfit_every', 1)} candidate window, "
             f"pause={params.get('debug_bestfit_pause', 0.05)} s)"
         )
     if params['proc_type'] == 'cont' and params.get('periods_2_proc') is not None:
@@ -1751,7 +1751,7 @@ def downstream_phase_lag(phase_up, phase_dwn):
 def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, bern,
                        A, Aerr, phi, phierr, window_number, global_start,
                        global_stop, thickness_mm, thickness_std_mm, pause_s,
-                       save_path=None):
+                       save_path=None, status_message=None):
     """Plot measured data and best-fit curves for one continuous window.
 
     Returns False when Figure 8 has been closed, so continuous processing can
@@ -1788,12 +1788,19 @@ def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, be
         f"phi = {phi:.5g} ± {phierr:.2g} rad",
         f"phi - arccos(A) = {margin:.5g} rad",
         f"T = {updata[1]:.5g} s",
-        f"eta = {bern['eta']:.5g}",
-        f"xi = {bern['xi']:.5g}",
-        f"k = {bern['k']:.3e} m²",
-        f"Storage = {bern['bc']:.3e} Pa⁻¹",
-        f"thickness = {thickness_mm:.3f} ± {thickness_std_mm:.3f} mm",
     ]
+    if bern is None:
+        info_lines.append("Bernabé solve: skipped")
+    else:
+        info_lines.extend([
+            f"eta = {bern['eta']:.5g}",
+            f"xi = {bern['xi']:.5g}",
+            f"k = {bern['k']:.3e} m²",
+            f"Storage = {bern['bc']:.3e} Pa⁻¹",
+        ])
+    if status_message:
+        info_lines.append(str(status_message))
+    info_lines.append(f"thickness = {thickness_mm:.3f} ± {thickness_std_mm:.3f} mm")
     ax_up.text(
         0.01, 0.98, "\n".join(info_lines), transform=ax_up.transAxes,
         va='top', ha='left', fontsize=9,
@@ -2164,9 +2171,38 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
         )
         print(f"debug_bestfit figures will be saved to: {debug_bestfit_dir}")
 
+    def maybe_plot_debug_window(window_number, m, n, updata, dwndata, bern,
+                                Ai, Aerri, phii, phierri, l, l_std,
+                                status_message=None):
+        """Plot/save Figure 8 for accepted or Bernabe-rejected fit windows."""
+        nonlocal debug_bestfit, debug_bestfit_started
+        if not debug_bestfit or ((window_number - 1) % debug_bestfit_every != 0):
+            return
+        if debug_bestfit_started and not plt.fignum_exists(8):
+            debug_bestfit = False
+            tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+            return
+
+        debug_bestfit_started = True
+        invalid_suffix = "_invalid" if bern is None else ""
+        debug_bestfit_path = debug_bestfit_dir / (
+            f"figure8_window_{window_number:04d}_"
+            f"idx_{roi_start + m}_{roi_start + n - 1}{invalid_suffix}.png"
+        )
+        debug_bestfit = plot_bestfit_debug(
+            time_roi[m:n], pup_roi[m:n], pdwn_roi[m:n],
+            updata, dwndata, bern, Ai, Aerri, phii, phierri,
+            window_number, roi_start + m, roi_start + n,
+            l * 1000, l_std * 1000, debug_bestfit_pause,
+            save_path=debug_bestfit_path,
+            status_message=status_message,
+        )
+        if not debug_bestfit:
+            tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+
     skipped_windows = 0
     with tqdm(total=len(window_bounds), desc="Continuous processing") as pbar:
-        for m, n, window_center_time in window_bounds:
+        for window_number, (m, n, window_center_time) in enumerate(window_bounds, start=1):
             try:
                 updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(
                     pup_roi[m:n], pdwn_roi[m:n], time_roi[m:n], params['N'], params['Tmin'], params['Tmax']
@@ -2178,13 +2214,25 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
                 Ti = updata[1]
 
                 l, l_std = window_length_m(params, thickness_roi, m, n)
+            except (RuntimeError, ValueError, TypeError, FloatingPointError, np.linalg.LinAlgError) as exc:
+                skipped_windows += 1
+                if skipped_windows <= 5:
+                    tqdm.write(f"Skipping continuous window {roi_start + m}:{roi_start + n - 1}: {exc}")
+                pbar.update(1)
+                continue
 
+            try:
                 bern = compute_bernabe_outputs(
                     Ai, Aerri, phii, up_params_bs, dwn_params_bs,
                     params, l, area, updata[3], Ti, up_err[1]
                 )
             except (RuntimeError, ValueError, TypeError, FloatingPointError, np.linalg.LinAlgError) as exc:
                 skipped_windows += 1
+                maybe_plot_debug_window(
+                    window_number, m, n, updata, dwndata, None,
+                    Ai, Aerri, phii, phierri, l, l_std,
+                    status_message=f"Skipped: {exc}",
+                )
                 if skipped_windows <= 5:
                     tqdm.write(f"Skipping continuous window {roi_start + m}:{roi_start + n - 1}: {exc}")
                 pbar.update(1)
@@ -2211,28 +2259,12 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
             thickness_std_mm = np.append(thickness_std_mm, l_std * 1000)
             processed_windows += 1
 
-            if debug_bestfit and ((processed_windows - 1) % debug_bestfit_every == 0):
-                if debug_bestfit_started and not plt.fignum_exists(8):
-                    debug_bestfit = False
-                    tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
-                else:
-                    debug_bestfit_started = True
-                    debug_bestfit_path = debug_bestfit_dir / (
-                        f"figure8_window_{processed_windows:04d}_"
-                        f"idx_{roi_start + m}_{roi_start + n - 1}.png"
-                    )
-                    debug_bestfit = plot_bestfit_debug(
-                        time_roi[m:n], pup_roi[m:n], pdwn_roi[m:n],
-                        updata, dwndata, bern, Ai, Aerri, phii, phierri,
-                        processed_windows, roi_start + m, roi_start + n,
-                        l * 1000, l_std * 1000, debug_bestfit_pause,
-                        save_path=debug_bestfit_path
-                    )
-                    if not debug_bestfit:
-                        tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+            maybe_plot_debug_window(
+                window_number, m, n, updata, dwndata, bern,
+                Ai, Aerri, phii, phierri, l, l_std,
+            )
 
             pbar.update(1)
-
     if skipped_windows:
         print(f"Skipped {skipped_windows} continuous window(s) because the fit or Bernabé solve was invalid.")
 
