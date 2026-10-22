@@ -1134,6 +1134,28 @@ def _config_get(config, sections, option, cast=str, default=None, required=False
     return default
 
 
+def _read_optional_time_bounds(config, start_option, end_option):
+    """Read one optional start/end time pair from the processing config."""
+    sections = ('Processing', 'File')
+    start_time_s = _config_get(config, sections, start_option, float, default=None)
+    end_time_s = _config_get(config, sections, end_option, float, default=None)
+    return start_time_s, end_time_s
+
+
+def _validate_optional_time_bounds(start_time_s, end_time_s, start_option, end_option):
+    """Validate an optional, complete, finite increasing start/end pair."""
+    if (start_time_s is None) != (end_time_s is None):
+        raise ValueError(
+            f"{start_option} and {end_option} must be provided together, or both omitted."
+        )
+    if start_time_s is None:
+        return
+    if not np.isfinite(start_time_s) or not np.isfinite(end_time_s):
+        raise ValueError(f"{start_option} and {end_option} must be finite values in seconds.")
+    if start_time_s >= end_time_s:
+        raise ValueError(f"{start_option} must be smaller than {end_option}.")
+
+
 def prompt_processing_parameters():
     """Interactive fallback used when no matching .ini file is available."""
     print("\n" + "=" * 60)
@@ -1245,6 +1267,12 @@ def prompt_processing_parameters():
     params['periods_2_proc'] = None
     params['start_time_s'] = None
     params['end_time_s'] = None
+    params['fit_start_time_s'] = None
+    params['fit_end_time_s'] = None
+    params['continuous_start_time_s'] = None
+    params['continuous_end_time_s'] = None
+    params['fit_roi_uses_shared_bounds'] = False
+    params['continuous_roi_uses_shared_bounds'] = False
     if params['proc_type'] == 'cont':
         params['periods_2_proc'] = prompt("How many periods do you want to process?", 5, cast=int)
 
@@ -1341,18 +1369,60 @@ def load_processing_config(datafile, outfile=None):
     )
     if params['periods_2_proc'] is not None and params['periods_2_proc'] <= 0:
         raise ValueError("periods_2_proc must be > 0.")
-    params['start_time_s'] = _config_get(config, ('Processing', 'File'), 'start_time_s', float, default=None)
-    params['end_time_s'] = _config_get(config, ('Processing', 'File'), 'end_time_s', float, default=None)
-    if (params['start_time_s'] is None) != (params['end_time_s'] is None):
+    params['start_time_s'], params['end_time_s'] = _read_optional_time_bounds(
+        config, 'start_time_s', 'end_time_s'
+    )
+    fit_start_time_s, fit_end_time_s = _read_optional_time_bounds(
+        config, 'fit_start_time_s', 'fit_end_time_s'
+    )
+    continuous_start_time_s, continuous_end_time_s = _read_optional_time_bounds(
+        config, 'continuous_start_time_s', 'continuous_end_time_s'
+    )
+    _validate_optional_time_bounds(
+        params['start_time_s'], params['end_time_s'], 'start_time_s', 'end_time_s'
+    )
+    _validate_optional_time_bounds(
+        fit_start_time_s, fit_end_time_s, 'fit_start_time_s', 'fit_end_time_s'
+    )
+    _validate_optional_time_bounds(
+        continuous_start_time_s, continuous_end_time_s,
+        'continuous_start_time_s', 'continuous_end_time_s'
+    )
+
+    if proc_type != 'cont' and (
+        fit_start_time_s is not None or continuous_start_time_s is not None
+    ):
         raise ValueError(
-            "start_time_s and end_time_s must be provided together, or both omitted "
-            "to use interactive ROI selection."
+            "fit_start_time_s/fit_end_time_s and "
+            "continuous_start_time_s/continuous_end_time_s apply only when proc_type = cont."
         )
-    if params['start_time_s'] is not None:
-        if not np.isfinite(params['start_time_s']) or not np.isfinite(params['end_time_s']):
-            raise ValueError("start_time_s and end_time_s must be finite values in seconds.")
-        if params['start_time_s'] >= params['end_time_s']:
-            raise ValueError("start_time_s must be smaller than end_time_s.")
+
+    # In continuous mode, dedicated pairs independently control the upstream
+    # initial-fit ROI and the downstream moving-window ROI. The original shared
+    # start_time_s/end_time_s pair remains a backwards-compatible fallback.
+    params['fit_roi_uses_shared_bounds'] = False
+    params['continuous_roi_uses_shared_bounds'] = False
+    if proc_type == 'cont':
+        if fit_start_time_s is None:
+            params['fit_start_time_s'] = params['start_time_s']
+            params['fit_end_time_s'] = params['end_time_s']
+            params['fit_roi_uses_shared_bounds'] = params['start_time_s'] is not None
+        else:
+            params['fit_start_time_s'] = fit_start_time_s
+            params['fit_end_time_s'] = fit_end_time_s
+
+        if continuous_start_time_s is None:
+            params['continuous_start_time_s'] = params['start_time_s']
+            params['continuous_end_time_s'] = params['end_time_s']
+            params['continuous_roi_uses_shared_bounds'] = params['start_time_s'] is not None
+        else:
+            params['continuous_start_time_s'] = continuous_start_time_s
+            params['continuous_end_time_s'] = continuous_end_time_s
+    else:
+        params['fit_start_time_s'] = None
+        params['fit_end_time_s'] = None
+        params['continuous_start_time_s'] = None
+        params['continuous_end_time_s'] = None
 
     thickness_mode = _config_get(config, ('Sample', 'Processing'), 'thickness_mode', str, default=None)
     if thickness_mode is None:
@@ -1488,7 +1558,20 @@ def print_input_summary(params, datafile):
         )
     if params['proc_type'] == 'cont' and params.get('periods_2_proc') is not None:
         print(f"  Continuous:  periods per window = {params['periods_2_proc']}")
-    if params.get('start_time_s') is not None:
+    if params['proc_type'] == 'cont':
+        if params.get('fit_start_time_s') is not None:
+            source = "shared legacy bounds" if params.get('fit_roi_uses_shared_bounds') else "dedicated bounds"
+            print(
+                f"  Fit ROI:     {params['fit_start_time_s']} s to {params['fit_end_time_s']} s "
+                f"[from config; {source}]"
+            )
+        if params.get('continuous_start_time_s') is not None:
+            source = "shared legacy bounds" if params.get('continuous_roi_uses_shared_bounds') else "dedicated bounds"
+            print(
+                f"  Continuous ROI: {params['continuous_start_time_s']} s to "
+                f"{params['continuous_end_time_s']} s [from config; {source}]"
+            )
+    elif params.get('start_time_s') is not None:
         print(f"  ROI:         {params['start_time_s']} s to {params['end_time_s']} s [from config]")
     print("=" * 60)
 
@@ -1630,6 +1713,31 @@ def roi_from_time_bounds(time, start_time_s, end_time_s):
             f"start_time_s={start_time_s}, end_time_s={end_time_s}."
         )
     return list(roi_bounds((start, end)))
+
+
+def configured_roi_time_bounds(params, roi_role='single'):
+    """Return configured bounds and labels for one workflow-specific ROI."""
+    roles = {
+        'single': (
+            'start_time_s', 'end_time_s',
+            'ROI', 'Selected Data Range from Config',
+        ),
+        'fit': (
+            'fit_start_time_s', 'fit_end_time_s',
+            'initial fitting ROI', 'Initial Fitting ROI from Config',
+        ),
+        'continuous': (
+            'continuous_start_time_s', 'continuous_end_time_s',
+            'continuous processing ROI', 'Continuous Processing ROI from Config',
+        ),
+    }
+    if roi_role not in roles:
+        raise ValueError(f"Unknown ROI role '{roi_role}'.")
+
+    start_key, end_key, label, title = roles[roi_role]
+    if params is None:
+        return None, None, label, title
+    return params.get(start_key), params.get(end_key), label, title
 
 
 def plot_selected_roi(time, pup, pdwn, idx, params=None, thickness=None, title='Selected Data Range'):
@@ -1836,22 +1944,23 @@ def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, be
     return plt.fignum_exists(8)
 
 
-def select_roi(time, pup, pdwn, params=None, thickness=None):
-    """Select/refine a region of interest interactively or from config."""
-    if params is not None and params.get('start_time_s') is not None:
-        print("\nSTEP 3: Using ROI from config file")
-        print(f"        start_time_s = {params['start_time_s']} s")
-        print(f"        end_time_s   = {params['end_time_s']} s")
-        idx = roi_from_time_bounds(time, params['start_time_s'], params['end_time_s'])
+def select_roi(time, pup, pdwn, params=None, thickness=None, roi_role='single'):
+    """Select/refine one workflow-specific ROI interactively or from config."""
+    start_time_s, end_time_s, roi_label, config_title = configured_roi_time_bounds(params, roi_role)
+    if start_time_s is not None:
+        print(f"\nSTEP 3: Using {roi_label} from config file")
+        print(f"        start_time_s = {start_time_s} s")
+        print(f"        end_time_s   = {end_time_s} s")
+        idx = roi_from_time_bounds(time, start_time_s, end_time_s)
         print(
             f"        Selected indices {idx[0]}:{idx[1]} "
             f"({time[idx[0]]:.6g} to {time[idx[1]]:.6g} s)"
         )
         plot_selected_roi(time, pup, pdwn, idx, params=params, thickness=thickness,
-                          title='Selected Data Range from Config')
+                          title=config_title)
         return idx
 
-    print("\nSTEP 3: Interactive plot will appear")
+    print(f"\nSTEP 3: Interactive plot will appear for {roi_label}")
     print("        Click 2 points to select COARSE region of interest")
 
     _fig1 = plt.figure(1)
@@ -2003,7 +2112,7 @@ def compute_bernabe_outputs(A, Aerr, phi, up_params_bs, dwn_params_bs, params, l
 
 def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
     time, pup, pdwn, pc, thickness = load_experiment_data(datafile, params)
-    idx = select_roi(time, pup, pdwn, params=params, thickness=thickness)
+    idx = select_roi(time, pup, pdwn, params=params, thickness=thickness, roi_role='single')
     validate_thickness_range(params, thickness, idx[0], idx[1] + 1, context="selected ROI")
     fit = fit_selected_window(time, pup, pdwn, idx, params)
 
@@ -2064,12 +2173,16 @@ def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
 
 def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     time_all, pup_all, pdwn_all, pc, thickness_all = load_experiment_data(datafile, params)
-    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
-    validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="selected ROI")
+    idx = select_roi(
+        time_all, pup_all, pdwn_all, params=params, thickness=thickness_all, roi_role='fit'
+    )
+    validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="initial fitting ROI")
     fit = fit_selected_window(time_all, pup_all, pdwn_all, idx, params)
 
     # Select ROI for continuous processing
-    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
+    idx = select_roi(
+        time_all, pup_all, pdwn_all, params=params, thickness=thickness_all, roi_role='continuous'
+    )
     roi_start, roi_end = idx[0], idx[1]
     roi_stop = roi_end + 1
     time_roi = time_all[roi_start:roi_stop]

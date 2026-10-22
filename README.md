@@ -64,9 +64,14 @@ Pc_col = 3
 [Processing]
 # processing type: sin for one selected oscillation interval, cont for continuous moving-window processing
 proc_type = sin
-# Optional: set both to skip manual ROI selection and use this time interval directly
+# Optional single ROI for proc_type = sin; legacy shared ROI for proc_type = cont
 # start_time_s = 0
 # end_time_s = 1000
+# Optional distinct ROIs for proc_type = cont
+# fit_start_time_s = 0
+# fit_end_time_s = 3000
+# continuous_start_time_s = 0
+# continuous_end_time_s = 10000
 
 [Fitting]
 # No of remaples for bootstrapping
@@ -354,12 +359,23 @@ Before running the script, set user inputs in the `.ini` config file as describe
 When you run the script you will be asked: 
 1) where you want to save the processed data.
 2) where the experimental data file is.
-3) select the start of data you want to process and the end on the figure, unless `[Processing] start_time_s` and `end_time_s` are set in the `.ini` file.
+3) select the required ROI(s) on the figure. A `sin` run has one ROI; a `cont` run keeps the upstream two-ROI workflow: first a fitting ROI for the initial wave parameters, then a continuous-processing ROI. Each can be configured in the `.ini` file.
 4) the script will chugg away and calculate permeability and display amplitude and phase shit on the nomogram.
 5) asked whether you want to process another data set if yes you goto step 2 above if no end
 6) output file is saved.
 ## Continuous Data
-There is functionality in this version to calculate how permeability varies with time. Set `[Processing] proc_type = cont` in the `.ini` file. The wave period should be approximately constant over the selected region. First, select a region of interest to calculate the initial wave parameters, either interactively or by setting `start_time_s` and `end_time_s` in `[Processing]`. The script then calculates permeability for a moving window of `periods_2_proc` waves and steps the window forward by one whole period. The data are plotted as time series and on the nomogram, and the processed data are saved as a CSV file.
+There is functionality in this version to calculate how permeability varies with time. Set `[Processing] proc_type = cont` in the `.ini` file. The upstream workflow deliberately has two ROIs: an **initial fitting ROI**, used to estimate the wave period and other starting fit parameters, and a **continuous-processing ROI**, over which moving permeability windows are calculated. The wave period should be approximately constant over both relevant regions.
+
+Select each ROI interactively, or configure them independently in `[Processing]`:
+
+```ini
+fit_start_time_s = 50000
+fit_end_time_s = 54000
+continuous_start_time_s = 48000
+continuous_end_time_s = 62000
+```
+
+Either complete pair may be omitted to retain interactive selection for that step. Existing configurations using only `start_time_s` and `end_time_s` remain valid: in continuous mode those shared bounds are used for both ROIs unless a dedicated pair overrides one of them. The script then calculates permeability for a moving window of `periods_2_proc` waves and steps the window forward by one whole period. The data are plotted as time series and on the nomogram, and the processed data are saved as a CSV file.
 ## Acknowledgements
 This code has been under development for many years with involvement from a number of coleagues in Manchester and Liverpool including: Ernie Rutter, Rosanne McKernan, Kier Groves, Mike Chandler, Rochelle Taylor, Yusuf Bashir, Lining Yang, Pete Armitage, John Bedford... Note need to add more people from Liverpool.
 
