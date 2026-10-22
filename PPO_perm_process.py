@@ -1134,6 +1134,28 @@ def _config_get(config, sections, option, cast=str, default=None, required=False
     return default
 
 
+def _read_optional_time_bounds(config, start_option, end_option):
+    """Read one optional start/end time pair from the processing config."""
+    sections = ('Processing', 'File')
+    start_time_s = _config_get(config, sections, start_option, float, default=None)
+    end_time_s = _config_get(config, sections, end_option, float, default=None)
+    return start_time_s, end_time_s
+
+
+def _validate_optional_time_bounds(start_time_s, end_time_s, start_option, end_option):
+    """Validate an optional, complete, finite increasing start/end pair."""
+    if (start_time_s is None) != (end_time_s is None):
+        raise ValueError(
+            f"{start_option} and {end_option} must be provided together, or both omitted."
+        )
+    if start_time_s is None:
+        return
+    if not np.isfinite(start_time_s) or not np.isfinite(end_time_s):
+        raise ValueError(f"{start_option} and {end_option} must be finite values in seconds.")
+    if start_time_s >= end_time_s:
+        raise ValueError(f"{start_option} must be smaller than {end_option}.")
+
+
 def prompt_processing_parameters():
     """Interactive fallback used when no matching .ini file is available."""
     print("\n" + "=" * 60)
@@ -1229,7 +1251,7 @@ def prompt_processing_parameters():
     params['debug_bestfit_every'] = 1
     params['debug_bestfit_pause'] = 0.05
     if params['debug_bestfit']:
-        params['debug_bestfit_every'] = prompt("Plot every N accepted continuous windows", 1, cast=int)
+        params['debug_bestfit_every'] = prompt("Plot every N candidate continuous windows", 1, cast=int)
         params['debug_bestfit_pause'] = prompt("Pause after each debug plot in seconds (finite value recommended)", 0.05, cast=float)
         if params['debug_bestfit_every'] < 1:
             raise ValueError("debug_bestfit_every must be >= 1.")
@@ -1242,7 +1264,17 @@ def prompt_processing_parameters():
             break
         print(f"  ⚠  Invalid choice '{proc_type}'. Please enter one of: {valid_proc_type}")
 
-    params['periods_2_proc'] = 5
+    params['periods_2_proc'] = None
+    params['start_time_s'] = None
+    params['end_time_s'] = None
+    params['fit_start_time_s'] = None
+    params['fit_end_time_s'] = None
+    params['continuous_start_time_s'] = None
+    params['continuous_end_time_s'] = None
+    params['fit_roi_uses_shared_bounds'] = False
+    params['continuous_roi_uses_shared_bounds'] = False
+    if params['proc_type'] == 'cont':
+        params['periods_2_proc'] = prompt("How many periods do you want to process?", 5, cast=int)
 
     while True:
         thickness_mode = prompt("Thickness mode [fixed/mean]", "fixed", cast=str).strip().lower()
@@ -1263,14 +1295,15 @@ def prompt_processing_parameters():
     return params
 
 
-def load_processing_config(datafile):
+def load_processing_config(datafile, outfile=None):
     """
     Load processing parameters using the config-file workflow.
 
     Search order:
-      1. <selected-data-file>.ini
-      2. config.ini beside this script
-      3. interactive prompts
+      1. <selected-output-csv>.ini, when an output path is provided
+      2. <selected-data-file>.ini
+      3. config.ini beside this script
+      4. interactive prompts
 
     Storage fields belong in [Storage]: mode plus either Dv/Dv_err or
     bd/bd_err. Legacy configs using bd_mode, or with Dv/bd under [Sample],
@@ -1279,7 +1312,21 @@ def load_processing_config(datafile):
     """
     script_root = Path(__file__).resolve().parent
     data_path = Path(datafile)
-    candidates = [data_path.with_suffix('.ini'), script_root / 'config.ini']
+    candidates = []
+    if outfile:
+        candidates.append(Path(outfile).with_suffix('.ini'))
+    candidates.extend([data_path.with_suffix('.ini'), script_root / 'config.ini'])
+
+    # Preserve search order while avoiding duplicate paths, e.g. when output and
+    # data file share the same stem.
+    unique_candidates = []
+    seen_candidates = set()
+    for candidate in candidates:
+        candidate_key = candidate.resolve() if candidate.exists() else candidate.absolute()
+        if candidate_key not in seen_candidates:
+            unique_candidates.append(candidate)
+            seen_candidates.add(candidate_key)
+    candidates = unique_candidates
 
     config_file = next((candidate for candidate in candidates if candidate.exists()), None)
     if config_file is None:
@@ -1322,6 +1369,60 @@ def load_processing_config(datafile):
     )
     if params['periods_2_proc'] is not None and params['periods_2_proc'] <= 0:
         raise ValueError("periods_2_proc must be > 0.")
+    params['start_time_s'], params['end_time_s'] = _read_optional_time_bounds(
+        config, 'start_time_s', 'end_time_s'
+    )
+    fit_start_time_s, fit_end_time_s = _read_optional_time_bounds(
+        config, 'fit_start_time_s', 'fit_end_time_s'
+    )
+    continuous_start_time_s, continuous_end_time_s = _read_optional_time_bounds(
+        config, 'continuous_start_time_s', 'continuous_end_time_s'
+    )
+    _validate_optional_time_bounds(
+        params['start_time_s'], params['end_time_s'], 'start_time_s', 'end_time_s'
+    )
+    _validate_optional_time_bounds(
+        fit_start_time_s, fit_end_time_s, 'fit_start_time_s', 'fit_end_time_s'
+    )
+    _validate_optional_time_bounds(
+        continuous_start_time_s, continuous_end_time_s,
+        'continuous_start_time_s', 'continuous_end_time_s'
+    )
+
+    if proc_type != 'cont' and (
+        fit_start_time_s is not None or continuous_start_time_s is not None
+    ):
+        raise ValueError(
+            "fit_start_time_s/fit_end_time_s and "
+            "continuous_start_time_s/continuous_end_time_s apply only when proc_type = cont."
+        )
+
+    # In continuous mode, dedicated pairs independently control the upstream
+    # initial-fit ROI and the downstream moving-window ROI. The original shared
+    # start_time_s/end_time_s pair remains a backwards-compatible fallback.
+    params['fit_roi_uses_shared_bounds'] = False
+    params['continuous_roi_uses_shared_bounds'] = False
+    if proc_type == 'cont':
+        if fit_start_time_s is None:
+            params['fit_start_time_s'] = params['start_time_s']
+            params['fit_end_time_s'] = params['end_time_s']
+            params['fit_roi_uses_shared_bounds'] = params['start_time_s'] is not None
+        else:
+            params['fit_start_time_s'] = fit_start_time_s
+            params['fit_end_time_s'] = fit_end_time_s
+
+        if continuous_start_time_s is None:
+            params['continuous_start_time_s'] = params['start_time_s']
+            params['continuous_end_time_s'] = params['end_time_s']
+            params['continuous_roi_uses_shared_bounds'] = params['start_time_s'] is not None
+        else:
+            params['continuous_start_time_s'] = continuous_start_time_s
+            params['continuous_end_time_s'] = continuous_end_time_s
+    else:
+        params['fit_start_time_s'] = None
+        params['fit_end_time_s'] = None
+        params['continuous_start_time_s'] = None
+        params['continuous_end_time_s'] = None
 
     thickness_mode = _config_get(config, ('Sample', 'Processing'), 'thickness_mode', str, default=None)
     if thickness_mode is None:
@@ -1452,11 +1553,26 @@ def print_input_summary(params, datafile):
     if params.get('debug_bestfit'):
         print(
             "  Debug:       debug_bestfit enabled "
-            f"(every {params.get('debug_bestfit_every', 1)} accepted window, "
+            f"(every {params.get('debug_bestfit_every', 1)} candidate window, "
             f"pause={params.get('debug_bestfit_pause', 0.05)} s)"
         )
     if params['proc_type'] == 'cont' and params.get('periods_2_proc') is not None:
         print(f"  Continuous:  periods per window = {params['periods_2_proc']}")
+    if params['proc_type'] == 'cont':
+        if params.get('fit_start_time_s') is not None:
+            source = "shared legacy bounds" if params.get('fit_roi_uses_shared_bounds') else "dedicated bounds"
+            print(
+                f"  Fit ROI:     {params['fit_start_time_s']} s to {params['fit_end_time_s']} s "
+                f"[from config; {source}]"
+            )
+        if params.get('continuous_start_time_s') is not None:
+            source = "shared legacy bounds" if params.get('continuous_roi_uses_shared_bounds') else "dedicated bounds"
+            print(
+                f"  Continuous ROI: {params['continuous_start_time_s']} s to "
+                f"{params['continuous_end_time_s']} s [from config; {source}]"
+            )
+    elif params.get('start_time_s') is not None:
+        print(f"  ROI:         {params['start_time_s']} s to {params['end_time_s']} s [from config]")
     print("=" * 60)
 
 
@@ -1480,6 +1596,20 @@ def _mat_vector(mat_data, var_name, scale=1.0):
 
 def load_experiment_data(datafile, params):
     """Load time, pressures, confining pressure, and optional thickness series."""
+    data_suffix = Path(datafile).suffix.lower()
+    if params['file_mode'] == 'dat' and data_suffix == '.mat':
+        raise ValueError(
+            f"Config file {params.get('config_file', '<interactive>')} has [File] mode = dat, "
+            f"but the selected input file is MATLAB data: {os.path.basename(datafile)}. "
+            "Set [File] mode = mat in the matching .ini file, or use an output-specific .ini "
+            "such as <output-csv-stem>.ini."
+        )
+    if params['file_mode'] == 'mat' and data_suffix not in ('', '.mat'):
+        raise ValueError(
+            f"Config file {params.get('config_file', '<interactive>')} has [File] mode = mat, "
+            f"but the selected input file does not have a .mat extension: {os.path.basename(datafile)}."
+        )
+
     if params['file_mode'] == 'dat':
         all_file = np.loadtxt(datafile, delimiter='\t', skiprows=params['HeaderRows'])
         time = all_file[:, params['time_col']]
@@ -1543,6 +1673,106 @@ def roi_bounds(idx):
     if start == end:
         raise ValueError("Selected ROI has zero length; click two different points.")
     return start, end
+
+
+def roi_from_time_bounds(time, start_time_s, end_time_s):
+    """Return inclusive ROI indices from configured time bounds in seconds."""
+    time = np.asarray(time, dtype=float)
+    if time.ndim != 1 or time.size < 2:
+        raise ValueError("Time data must be a one-dimensional array with at least two points.")
+    if not np.all(np.isfinite(time)):
+        raise ValueError("Time data contain non-finite values; cannot use configured ROI bounds.")
+
+    data_min = float(np.min(time))
+    data_max = float(np.max(time))
+    if start_time_s < data_min or end_time_s > data_max:
+        raise ValueError(
+            "Configured ROI is outside the available time range: "
+            f"start_time_s={start_time_s}, end_time_s={end_time_s}, "
+            f"data range={data_min} to {data_max} s."
+        )
+
+    increasing = np.all(np.diff(time) >= 0)
+    if increasing:
+        start = int(np.searchsorted(time, start_time_s, side='left'))
+        end = int(np.searchsorted(time, end_time_s, side='right')) - 1
+    else:
+        mask = (time >= start_time_s) & (time <= end_time_s)
+        if not np.any(mask):
+            raise ValueError(
+                "Configured ROI contains no samples: "
+                f"start_time_s={start_time_s}, end_time_s={end_time_s}."
+            )
+        selected = np.where(mask)[0]
+        start = int(selected[0])
+        end = int(selected[-1])
+
+    if start < 0 or end >= len(time) or start >= end:
+        raise ValueError(
+            "Configured ROI contains fewer than two samples: "
+            f"start_time_s={start_time_s}, end_time_s={end_time_s}."
+        )
+    return list(roi_bounds((start, end)))
+
+
+def configured_roi_time_bounds(params, roi_role='single'):
+    """Return configured bounds and labels for one workflow-specific ROI."""
+    roles = {
+        'single': (
+            'start_time_s', 'end_time_s',
+            'ROI', 'Selected Data Range from Config',
+        ),
+        'fit': (
+            'fit_start_time_s', 'fit_end_time_s',
+            'initial fitting ROI', 'Initial Fitting ROI from Config',
+        ),
+        'continuous': (
+            'continuous_start_time_s', 'continuous_end_time_s',
+            'continuous processing ROI', 'Continuous Processing ROI from Config',
+        ),
+    }
+    if roi_role not in roles:
+        raise ValueError(f"Unknown ROI role '{roi_role}'.")
+
+    start_key, end_key, label, title = roles[roi_role]
+    if params is None:
+        return None, None, label, title
+    return params.get(start_key), params.get(end_key), label, title
+
+
+def plot_selected_roi(time, pup, pdwn, idx, params=None, thickness=None, title='Selected Data Range'):
+    """Show Figure 2 with the final selected/configured ROI."""
+    fig_selected = plt.figure(2)
+    fig_selected.clf()
+    ax_selected = fig_selected.add_subplot(111)
+    ax_selected.plot(time, pup, 'r', label='Upstream Pressure')
+    ax_selected.plot(time, pdwn, 'b', label='Downstream Pressure')
+    ax_selected.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
+    ax_selected.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
+    ax_selected.set_xlabel('Time (s)')
+    ax_selected.set_ylabel('Pressure (MPa)')
+    ax_selected.set_title(title)
+    ax_selected.legend(loc='upper left')
+    ax_selected.grid(True, linestyle='--', alpha=0.35)
+
+    if params is not None and params.get('thickness_mode') == 'mean' and thickness is not None:
+        thickness_values = np.asarray(thickness, dtype=float)
+        if len(thickness_values) == len(time):
+            valid_thickness = np.isfinite(thickness_values)
+            if np.any(valid_thickness):
+                ax_thickness = ax_selected.twinx()
+                ax_thickness.plot(
+                    time[valid_thickness], thickness_values[valid_thickness],
+                    color='tab:green', lw=0.9, alpha=0.8,
+                )
+                ax_thickness.set_ylabel('Thickness (mm)', color='tab:green')
+                ax_thickness.tick_params(axis='y', labelcolor='tab:green')
+                ax_thickness.spines['right'].set_color('tab:green')
+    tile_figure(2, row=0, col=1)
+    make_figure_topmost(fig_selected)
+    plt.show(block=False)
+    plt.pause(0.1)
+    return fig_selected
 
 
 def validate_thickness_range(params, thickness, start, stop, context="selected ROI"):
@@ -1629,7 +1859,7 @@ def downstream_phase_lag(phase_up, phase_dwn):
 def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, bern,
                        A, Aerr, phi, phierr, window_number, global_start,
                        global_stop, thickness_mm, thickness_std_mm, pause_s,
-                       save_path=None):
+                       save_path=None, status_message=None):
     """Plot measured data and best-fit curves for one continuous window.
 
     Returns False when Figure 8 has been closed, so continuous processing can
@@ -1666,12 +1896,19 @@ def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, be
         f"phi = {phi:.5g} ± {phierr:.2g} rad",
         f"phi - arccos(A) = {margin:.5g} rad",
         f"T = {updata[1]:.5g} s",
-        f"eta = {bern['eta']:.5g}",
-        f"xi = {bern['xi']:.5g}",
-        f"k = {bern['k']:.3e} m²",
-        f"Storage = {bern['bc']:.3e} Pa⁻¹",
-        f"thickness = {thickness_mm:.3f} ± {thickness_std_mm:.3f} mm",
     ]
+    if bern is None:
+        info_lines.append("Bernabé solve: skipped")
+    else:
+        info_lines.extend([
+            f"eta = {bern['eta']:.5g}",
+            f"xi = {bern['xi']:.5g}",
+            f"k = {bern['k']:.3e} m²",
+            f"Storage = {bern['bc']:.3e} Pa⁻¹",
+        ])
+    if status_message:
+        info_lines.append(str(status_message))
+    info_lines.append(f"thickness = {thickness_mm:.3f} ± {thickness_std_mm:.3f} mm")
     ax_up.text(
         0.01, 0.98, "\n".join(info_lines), transform=ax_up.transAxes,
         va='top', ha='left', fontsize=9,
@@ -1707,9 +1944,23 @@ def plot_bestfit_debug(time_window, pup_window, pdwn_window, updata, dwndata, be
     return plt.fignum_exists(8)
 
 
-def select_roi(time, pup, pdwn, params=None, thickness=None):
-    """Interactively select and refine a region of interest."""
-    print("\nSTEP 3: Interactive plot will appear")
+def select_roi(time, pup, pdwn, params=None, thickness=None, roi_role='single'):
+    """Select/refine one workflow-specific ROI interactively or from config."""
+    start_time_s, end_time_s, roi_label, config_title = configured_roi_time_bounds(params, roi_role)
+    if start_time_s is not None:
+        print(f"\nSTEP 3: Using {roi_label} from config file")
+        print(f"        start_time_s = {start_time_s} s")
+        print(f"        end_time_s   = {end_time_s} s")
+        idx = roi_from_time_bounds(time, start_time_s, end_time_s)
+        print(
+            f"        Selected indices {idx[0]}:{idx[1]} "
+            f"({time[idx[0]]:.6g} to {time[idx[1]]:.6g} s)"
+        )
+        plot_selected_roi(time, pup, pdwn, idx, params=params, thickness=thickness,
+                          title=config_title)
+        return idx
+
+    print(f"\nSTEP 3: Interactive plot will appear for {roi_label}")
     print("        Click 2 points to select COARSE region of interest")
 
     _fig1 = plt.figure(1)
@@ -1754,36 +2005,7 @@ def select_roi(time, pup, pdwn, params=None, thickness=None):
     idx = [tree.query(pt)[1] for pt in pts]
     idx = list(roi_bounds(idx))
 
-    fig_selected = plt.figure(2)
-    fig_selected.clf()
-    ax_selected = fig_selected.add_subplot(111)
-    ax_selected.plot(time, pup, 'r', label='Upstream Pressure')
-    ax_selected.plot(time, pdwn, 'b', label='Downstream Pressure')
-    ax_selected.axvline(time[idx[0]], color='g', linestyle='--', label='Start Point')
-    ax_selected.axvline(time[idx[1]], color='m', linestyle='--', label='End Point')
-    ax_selected.set_xlabel('Time (s)')
-    ax_selected.set_ylabel('Pressure (MPa)')
-    ax_selected.set_title('Selected Data Range')
-    ax_selected.legend(loc='upper left')
-    ax_selected.grid(True, linestyle='--', alpha=0.35)
-
-    if params is not None and params.get('thickness_mode') == 'mean' and thickness is not None:
-        thickness_values = np.asarray(thickness, dtype=float)
-        if len(thickness_values) == len(time):
-            valid_thickness = np.isfinite(thickness_values)
-            if np.any(valid_thickness):
-                ax_thickness = ax_selected.twinx()
-                ax_thickness.plot(
-                    time[valid_thickness], thickness_values[valid_thickness],
-                    color='tab:green', lw=0.9, alpha=0.8,
-                )
-                ax_thickness.set_ylabel('Thickness (mm)', color='tab:green')
-                ax_thickness.tick_params(axis='y', labelcolor='tab:green')
-                ax_thickness.spines['right'].set_color('tab:green')
-    tile_figure(2, row=0, col=1)
-    make_figure_topmost(fig_selected)
-    plt.show(block=False)
-    plt.pause(0.1)
+    plot_selected_roi(time, pup, pdwn, idx, params=params, thickness=thickness)
     return idx
 
 
@@ -1890,7 +2112,7 @@ def compute_bernabe_outputs(A, Aerr, phi, up_params_bs, dwn_params_bs, params, l
 
 def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
     time, pup, pdwn, pc, thickness = load_experiment_data(datafile, params)
-    idx = select_roi(time, pup, pdwn, params=params, thickness=thickness)
+    idx = select_roi(time, pup, pdwn, params=params, thickness=thickness, roi_role='single')
     validate_thickness_range(params, thickness, idx[0], idx[1] + 1, context="selected ROI")
     fit = fit_selected_window(time, pup, pdwn, idx, params)
 
@@ -1951,12 +2173,16 @@ def process_single_measurement(datafile, outfile, params, first_loop, nomo_ax):
 
 def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
     time_all, pup_all, pdwn_all, pc, thickness_all = load_experiment_data(datafile, params)
-    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
-    validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="selected ROI")
+    idx = select_roi(
+        time_all, pup_all, pdwn_all, params=params, thickness=thickness_all, roi_role='fit'
+    )
+    validate_thickness_range(params, thickness_all, idx[0], idx[1] + 1, context="initial fitting ROI")
     fit = fit_selected_window(time_all, pup_all, pdwn_all, idx, params)
 
     # Select ROI for continuous processing
-    idx = select_roi(time_all, pup_all, pdwn_all, params=params, thickness=thickness_all)
+    idx = select_roi(
+        time_all, pup_all, pdwn_all, params=params, thickness=thickness_all, roi_role='continuous'
+    )
     roi_start, roi_end = idx[0], idx[1]
     roi_stop = roi_end + 1
     time_roi = time_all[roi_start:roi_stop]
@@ -2058,9 +2284,38 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
         )
         print(f"debug_bestfit figures will be saved to: {debug_bestfit_dir}")
 
+    def maybe_plot_debug_window(window_number, m, n, updata, dwndata, bern,
+                                Ai, Aerri, phii, phierri, l, l_std,
+                                status_message=None):
+        """Plot/save Figure 8 for accepted or Bernabe-rejected fit windows."""
+        nonlocal debug_bestfit, debug_bestfit_started
+        if not debug_bestfit or ((window_number - 1) % debug_bestfit_every != 0):
+            return
+        if debug_bestfit_started and not plt.fignum_exists(8):
+            debug_bestfit = False
+            tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+            return
+
+        debug_bestfit_started = True
+        invalid_suffix = "_invalid" if bern is None else ""
+        debug_bestfit_path = debug_bestfit_dir / (
+            f"figure8_window_{window_number:04d}_"
+            f"idx_{roi_start + m}_{roi_start + n - 1}{invalid_suffix}.png"
+        )
+        debug_bestfit = plot_bestfit_debug(
+            time_roi[m:n], pup_roi[m:n], pdwn_roi[m:n],
+            updata, dwndata, bern, Ai, Aerri, phii, phierri,
+            window_number, roi_start + m, roi_start + n,
+            l * 1000, l_std * 1000, debug_bestfit_pause,
+            save_path=debug_bestfit_path,
+            status_message=status_message,
+        )
+        if not debug_bestfit:
+            tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+
     skipped_windows = 0
     with tqdm(total=len(window_bounds), desc="Continuous processing") as pbar:
-        for m, n, window_center_time in window_bounds:
+        for window_number, (m, n, window_center_time) in enumerate(window_bounds, start=1):
             try:
                 updata, dwndata, up_err, dwn_err, up_params_bs, dwn_params_bs = sin_fits_bootstrap(
                     pup_roi[m:n], pdwn_roi[m:n], time_roi[m:n], params['N'], params['Tmin'], params['Tmax']
@@ -2072,13 +2327,25 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
                 Ti = updata[1]
 
                 l, l_std = window_length_m(params, thickness_roi, m, n)
+            except (RuntimeError, ValueError, TypeError, FloatingPointError, np.linalg.LinAlgError) as exc:
+                skipped_windows += 1
+                if skipped_windows <= 5:
+                    tqdm.write(f"Skipping continuous window {roi_start + m}:{roi_start + n - 1}: {exc}")
+                pbar.update(1)
+                continue
 
+            try:
                 bern = compute_bernabe_outputs(
                     Ai, Aerri, phii, up_params_bs, dwn_params_bs,
                     params, l, area, updata[3], Ti, up_err[1]
                 )
             except (RuntimeError, ValueError, TypeError, FloatingPointError, np.linalg.LinAlgError) as exc:
                 skipped_windows += 1
+                maybe_plot_debug_window(
+                    window_number, m, n, updata, dwndata, None,
+                    Ai, Aerri, phii, phierri, l, l_std,
+                    status_message=f"Skipped: {exc}",
+                )
                 if skipped_windows <= 5:
                     tqdm.write(f"Skipping continuous window {roi_start + m}:{roi_start + n - 1}: {exc}")
                 pbar.update(1)
@@ -2105,28 +2372,12 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
             thickness_std_mm = np.append(thickness_std_mm, l_std * 1000)
             processed_windows += 1
 
-            if debug_bestfit and ((processed_windows - 1) % debug_bestfit_every == 0):
-                if debug_bestfit_started and not plt.fignum_exists(8):
-                    debug_bestfit = False
-                    tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
-                else:
-                    debug_bestfit_started = True
-                    debug_bestfit_path = debug_bestfit_dir / (
-                        f"figure8_window_{processed_windows:04d}_"
-                        f"idx_{roi_start + m}_{roi_start + n - 1}.png"
-                    )
-                    debug_bestfit = plot_bestfit_debug(
-                        time_roi[m:n], pup_roi[m:n], pdwn_roi[m:n],
-                        updata, dwndata, bern, Ai, Aerri, phii, phierri,
-                        processed_windows, roi_start + m, roi_start + n,
-                        l * 1000, l_std * 1000, debug_bestfit_pause,
-                        save_path=debug_bestfit_path
-                    )
-                    if not debug_bestfit:
-                        tqdm.write("debug_bestfit disabled because Figure 8 was closed; continuing analysis.")
+            maybe_plot_debug_window(
+                window_number, m, n, updata, dwndata, bern,
+                Ai, Aerri, phii, phierri, l, l_std,
+            )
 
             pbar.update(1)
-
     if skipped_windows:
         print(f"Skipped {skipped_windows} continuous window(s) because the fit or Bernabé solve was invalid.")
 
@@ -2276,7 +2527,7 @@ def main():
             break
 
         print(f"\nLoading data from: {os.path.basename(datafile)}")
-        params = load_processing_config(datafile)
+        params = load_processing_config(datafile, outfile)
         print_input_summary(params, datafile)
 
         if params['proc_type'] == 'cont':
