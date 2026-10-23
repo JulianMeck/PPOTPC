@@ -1,8 +1,8 @@
 # Pore Pressure Oscilation Technique Processing Code PPOTPC
 ## Julian Mecklenburgh<sup>1</sup>, Izzy Ashman<sup>2</sup>, Pier-Carlo Giacomel<sup>2</sup>, Stefano Aretusini<sup>3</sup>  and Dan Faulkner<sup>2</sup>
-# 1: University of Manchester
-# 2: Liverpool University
-# 3: INGV Roma
+<p>1: University of Manchester</p> 
+<p>2: Liverpool University</p>
+<p>3: INGV Roma</p>
 Code to process pore pressure oscilation permeability measurement technique. The code is based on paper Bernabé et al. (2006). The script takes data of upstream and dowstram pressure varies with time and fits the oscilations with sine waves using a least-squares spectral ananlysis technique. Then from the fits it calculates the amplitude gain of the downstream to upstream and the phase shift between the upstream and downstream. From the gain $A$ and phase shift $\phi$ the dimensionless permeability $\eta$ and dimesionless storativity $\xi$ are calculated from eq 1 of Bernabé et al. (2006) given here:
 
 $$A\mathrm{e}^{-\mathrm{i}\phi}=\left(\frac{1+\mathrm{i}}{\sqrt{\xi\eta}}\mathrm{sinh}\left[\left(1+\mathrm{i}\right)\sqrt{\frac{\xi}{\eta}}\right]+\mathrm{cosh}\left[\left(1+\mathrm{i}\right)\sqrt{\frac{\xi}{\eta}}\right]\right)^{-1}$$
