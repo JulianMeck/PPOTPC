@@ -369,7 +369,7 @@ There is functionality in this version to calculate how permeability varies with
 This code has been under development for many years with involvement from a number of coleagues in Manchester and Liverpool including: Ernie Rutter, Rosanne McKernan, Kier Groves, Mike Chandler, Rochelle Taylor, Yusuf Bashir, Lining Yang, Pete Armitage, John Bedford... Note need to add more people from Liverpool.
 
 ## References
-Bernabé, Y., et al. (2006). "A note on the oscillating flow method for measuring rock permeability." International Journal of Rock Mechanics and Mining Sciences 43(2): 311-316.
+Bernabé, Y., et al. (2006). "A note on the oscillating flow method for measuring rock permeability." International Journal of Rock Mechanics and Mining Sciences 43(2): 311-316. https://doi.org/10.1016/j.ijrmms.2005.04.013
 
 https://iapws.org/release.html
 
