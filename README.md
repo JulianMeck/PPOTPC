@@ -1,5 +1,5 @@
 # Pore Pressure Oscilation Technique Processing Code PPOTPC
-## Julian Mecklenburgh^{1}, Izzy Ashman^{2}, Pier-Carlo Giacomel^{2}, Stefano Aretusini^{3}  and Dan Faulkner^{2}
+## Julian Mecklenburgh<sup>1</sup>, Izzy Ashman<sup>2</sup>, Pier-Carlo Giacomel<sup>2</sup>, Stefano Aretusini<sup>3</sup>  and Dan Faulkner<sup>2</sup>
 1: University of Manchester
 2: Liverpool University
 3: INGV Roma
