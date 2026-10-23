@@ -68,6 +68,11 @@ Pc_col = 3
 # processing type: sin for one selected oscillation interval, cont for continuous moving-window processing
 proc_type = sin
 
+# Required/recommended when proc_type = cont.
+# Number of wave periods in each time-based moving window.
+# The window advances by one fitted period.
+periods_2_proc = 5
+
 [Fitting]
 # No of remaples for bootstrapping
 N = 20
@@ -84,7 +89,7 @@ debug_bestfit = false
 debug_bestfit_every = 1
 debug_bestfit_pause = 0.05
 ```
-You can set the column number in the input data file for time, upstream pressure and downstream pressure using the parameters ```time_col```, ```Pup_col``` and ```Pdwn_col```. Then also the number of header rows needs to be set with ```HeaderRows```. The specific pore fluid used in the experiment can be set be setting the parameter ```permeant``` to either 'water', 'argon' or 'rheolube' the three main permeants used in the lab in Manchester. Other permeants could be used but the compressibility and viscosity would need to be defined.  For water the compressibity and viscosity is calculated from pressure and temperature using the International Assocation for the Properties of Water and Steam (IAPWS) python project for calculating the properties of water ```iapws```. For argon there is a python script written by Julian that calculates the compressibilty and viscosity from pressure and temperature using published formulations.  For Rheolube there is a procedure in the script that calculates the compressibilty and viscosity from pressure and temperature using published formulations.  
+<p>You can set the column number in the input data file for time, upstream pressure and downstream pressure using the parameters ```time_col```, ```Pup_col``` and ```Pdwn_col```. Then also the number of header rows needs to be set with ```HeaderRows```. The specific pore fluid used in the experiment can be set be setting the parameter ```permeant``` to either 'water', 'argon' or 'rheolube' the three main permeants used in the lab in Manchester. Other permeants could be used but the compressibility and viscosity would need to be defined.  For water the compressibity and viscosity is calculated from pressure and temperature using the International Assocation for the Properties of Water and Steam (IAPWS) python project for calculating the properties of water ```iapws```. For argon there is a python script written by Julian that calculates the compressibilty and viscosity from pressure and temperature using published formulations.  For Rheolube there is a procedure in the script that calculates the compressibilty and viscosity from pressure and temperature using published formulations.  </p>
 
 ### Downstream storage mode: `Dv` or `bd`
 
