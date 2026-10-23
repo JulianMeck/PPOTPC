@@ -2223,6 +2223,7 @@ def process_continuous(datafile, outfile, params, first_loop, nomo_ax):
         print(f"Last storage capacity: {format_value_error(bc[-1], bc_err[-1], 'Pa⁻¹')}")
         if np.all(np.isfinite(bc)) and np.all(bc == 0) and np.all(~np.isfinite(bc_err)):
             print("Storage remained on the xi=0 boundary; delbeta is undefined and stored as NaN in the CSV.")
+    print("Close all figures to end processing.")
     print(f"{'=' * 60}")
     return nomo_ax
 
